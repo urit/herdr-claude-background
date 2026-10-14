@@ -85,6 +85,9 @@ STARTED_RES = [
 ]
 NOTIF_ID_RE = re.compile(r"<task-id>(\w+)</task-id>")
 NOTIF_STATUS_RE = re.compile(r"<status>(\w+)</status>")
+# An agent waiting on background work of its own reports "completed" with this
+# note, then notifies again when it really finishes.
+INTERIM = "with background work of its own still running"
 GLYPH = {"monitor": "◎", "shell": "▶"}
 # Row color = state: subagents and shells are "working" while listed; a
 # monitor is "watching" while armed and "working" for a minute after it last
@@ -138,6 +141,8 @@ def parse_screen(screen):
         if "⏵⏵" in line or COUNT_RE.search(line) and " · " in line:
             for n, kind in COUNT_RE.findall(line):
                 counts["background" if kind == "bg" else kind] = int(n)
+            if "/tasks to see subagents" in line:
+                counts["hidden_agents"] = 1  # the list is toggled off
             break
     try:
         start = max(i for i, l in enumerate(lines) if MAIN_RE.match(l))
@@ -181,8 +186,12 @@ class Transcript:
                 entry = json.loads(raw)
             except ValueError:
                 continue
-            msg = entry.get("message") or {}
             when = epoch(entry.get("timestamp"))
+            if entry.get("type") == "queue-operation":
+                # Task notifications are queued as entries of their own.
+                self._notifications(self._text(entry.get("content")), when)
+                continue
+            msg = entry.get("message") or {}
             content = msg.get("content")
             blocks = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
             for b in blocks:
@@ -212,7 +221,7 @@ class Transcript:
         # event-only notifications (a monitor's output line) carry no status.
         for chunk in text.split("<task-notification>")[1:]:
             tid, status = NOTIF_ID_RE.search(chunk), NOTIF_STATUS_RE.search(chunk)
-            if tid and status:
+            if tid and status and INTERIM not in chunk:
                 self.ended.add(tid.group(1))
             elif tid and when:
                 self.fired[tid.group(1)] = when
@@ -222,8 +231,8 @@ class Session:
     """A session's transcript plus its subagents' (<session>/subagents/*.jsonl):
     a subagent's monitors and shells count in the same footer."""
 
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, path, started=0):
+        self.path, self.started = path, started  # epoch the Claude process started
         self.subagents = os.path.join(os.path.splitext(path)[0], "subagents")
         self.transcripts = {path: Transcript(path)}
 
@@ -234,11 +243,32 @@ class Session:
         for t in self.transcripts.values():
             t.update()
 
+    def _ended(self):
+        return set().union(*(t.ended for t in self.transcripts.values()))
+
+    def agents(self):
+        """Background subagents still running, newest first: started by this
+        Claude process (an earlier one's can't be) and not reported finished."""
+        ended, found = self._ended(), []
+        for meta in glob.glob(os.path.join(self.subagents, "agent-*.meta.json")):
+            aid = os.path.basename(meta)[len("agent-"):-len(".meta.json")]
+            try:
+                if aid in ended or os.path.getmtime(meta[:-len(".meta.json")] + ".jsonl") < self.started:
+                    continue
+                with open(meta) as f:
+                    m = json.load(f)
+                if m.get("requestShape") != "background":
+                    continue  # a foreground agent's end is not notified
+                found.append((os.path.getmtime(meta), m.get("agentType") or "agent", m.get("description") or ""))
+            except (OSError, ValueError):
+                continue
+        return [(kind, desc) for _, kind, desc in sorted(found, reverse=True)]
+
     def live(self, kind, n):
         """The n most recently started live tasks of a kind (the footer's count wins)."""
         if n <= 0:
             return []
-        ended = set().union(*(t.ended for t in self.transcripts.values()))
+        ended = self._ended()
         fired = {}
         for t in self.transcripts.values():
             fired.update(t.fired)
@@ -256,13 +286,15 @@ def transcript_for(pane):
     try:
         pid = claude_pid(pane)
         with open(os.path.join(CLAUDE_DIR, "sessions", f"{pid}.json")) as f:
-            sid = json.load(f)["sessionId"]
+            info = json.load(f)
+        sid, started = info["sessionId"], (info.get("startedAt") or 0) / 1000
         path = glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", f"{sid}.jsonl"))[0]
     except (ValueError, KeyError, OSError, IndexError):
         return None
     t = sessions.get(pane)
     if not t or t.path != path:  # /clear or a new session in the same pane
         t = sessions[pane] = Session(path)
+    t.started = started  # a resumed session keeps its path but not its process
     t.update()
     return t
 
@@ -312,6 +344,10 @@ def render(pane, agents, counts):
         # transcript's live ones, capped by its total.
         for kind in ("monitor", "shell"):
             counts[kind] = len(t.live(kind, counts["background"]))
+    if t and counts.get("hidden_agents") and not agents:
+        # The footer hides the list ("/tasks to see subagents"), so take the
+        # running agents from the transcripts.
+        agents = t.agents()
     now = time.time()
     items = [("working", agent_glyph(kind), desc) for kind, desc in agents]
     for kind in ("monitor", "shell"):

@@ -56,7 +56,10 @@ Claude draws (`1 shell · 2 monitors`, and the list of running subagents
 under `⏺ main`; agents started together share a line, shown as
 `code-review ×10: …`), reads the session's transcripts — its own and its
 subagents' — for what each monitor and shell was started to do, and reports
-the result as `$bg1`..`$bg5` pane metadata.
+the result as `$bg1`..`$bg5` pane metadata. When the subagent list is toggled
+off (`/tasks to see subagents`), the running background agents come from the
+transcripts instead: those started by the current Claude process with no
+final completion notice yet.
 
 The watcher runs under a small supervisor that restarts it if it crashes or is
 killed, with a lock so only one runs per herdr server (each named session gets

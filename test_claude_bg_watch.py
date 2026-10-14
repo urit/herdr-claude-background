@@ -46,6 +46,11 @@ class ParseScreen(unittest.TestCase):
         _, counts = w.parse_screen(screen("  ⏵⏵ auto mode on · 2 background"))
         self.assertEqual(counts, {"background": 2})
 
+    def test_hidden_agent_list(self):
+        _, counts = w.parse_screen(screen(
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ⧉ 2 · /tasks to see subagents · ← 1 agent"))
+        self.assertEqual(counts, {"hidden_agents": 1})
+
     def test_idle_footer(self):
         self.assertEqual(w.parse_screen(screen("  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent")), ([], {}))
 
@@ -85,6 +90,70 @@ class SessionTasks(unittest.TestCase):
                 f.write(entry("02:00", use("u4", "TaskStop", task_id="s1")) + "\n")
             session.update()
             self.assertEqual(session.live("shell", 5), [])
+
+
+def queued(ts, tid, status=None, note=""):
+    body = f"<task-id>{tid}</task-id>\n" + (f"<status>{status}</status>\n" if status else "") + note
+    return json.dumps({"type": "queue-operation", "operation": "enqueue",
+                       "timestamp": f"2026-10-14T10:{ts}Z", "content": f"<task-notification>\n{body}</task-notification>"})
+
+
+INTERIM_NOTE = ("<note>This agent stopped with background work of its own still running. "
+                "It may resume on its own when that work completes or reports</note>")
+
+
+class QueuedNotifications(unittest.TestCase):
+    """Claude Code 2.1.299 queues task notifications as entries of their own."""
+
+    def write(self, path, *lines, mode="w"):
+        with open(path, mode) as f:
+            f.write("".join(line + "\n" for line in lines))
+
+    def test_queued_status_ends_a_task_and_events_mark_it_fired(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            self.write(main,
+                       entry("00:00", use("u1", "Monitor", description="watch CI")),
+                       entry("00:01", result("u1", "Monitor started (task m1, timeout 3600000ms)")),
+                       queued("00:30", "m1"))
+            session = w.Session(main)
+            session.update()
+            [(desc, fired)] = session.live("monitor", 5)
+            self.assertEqual(desc, "watch CI")
+            self.assertEqual(fired, w.epoch("2026-10-14T10:00:30Z"))
+            self.write(main, queued("01:00", "m1", "completed"), mode="a")
+            session.update()
+            self.assertEqual(session.live("monitor", 5), [])
+
+    def test_background_agents_from_transcripts(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            subs = os.path.join(d, "sid", "subagents")
+            os.makedirs(subs)
+
+            def agent(aid, desc, shape="background", mtime=None):
+                with open(os.path.join(subs, f"agent-{aid}.meta.json"), "w") as f:
+                    json.dump({"agentType": "general-purpose", "description": desc, "requestShape": shape}, f)
+                log = os.path.join(subs, f"agent-{aid}.jsonl")
+                self.write(log, entry("00:00", {"type": "text", "text": "working"}))
+                if mtime:
+                    os.utime(log, (mtime, mtime))
+
+            agent("a1", "Verify M1 refresh race")
+            agent("a2", "Angle B removed-behavior audit")
+            agent("a3", "Waiting on its own blind readers")
+            agent("a4", "Foreground helper", shape="foreground")
+            agent("a5", "Left over from before a resume", mtime=1000)
+            self.write(main,
+                       queued("01:00", "a2", "completed"),
+                       queued("01:05", "a3", "completed", INTERIM_NOTE))
+            session = w.Session(main, started=2000)
+            session.update()
+            self.assertEqual(sorted(desc for _, desc in session.agents()),
+                             ["Verify M1 refresh race", "Waiting on its own blind readers"])
+            self.write(main, queued("02:00", "a3", "completed"), mode="a")
+            session.update()
+            self.assertEqual([desc for _, desc in session.agents()], ["Verify M1 refresh race"])
 
 
 if __name__ == "__main__":
