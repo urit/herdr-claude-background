@@ -17,6 +17,9 @@ change worth reinstalling for.
 
 ## Before pushing
 
+- `python3 -m unittest`. When Claude Code changes its footer or transcript
+  format, add the real lines to `test_claude_bg_watch.py` before fixing the
+  parser.
 - Look at the sidebar, not only `--once`: report test values on a pane with a
   different `--source` (`herdr pane report-metadata <pane> --source test
   --token 'bg1=…'`) and render it with

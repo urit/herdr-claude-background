@@ -53,8 +53,10 @@ with, and Claude Code. macOS and Linux.
 
 Every 3 seconds the watcher reads each Claude pane's screen for the footer
 Claude draws (`1 shell · 2 monitors`, and the list of running subagents
-under `⏺ main`), reads the session transcript for what each monitor and shell
-was started to do, and reports the result as `$bg1`..`$bg5` pane metadata.
+under `⏺ main`; agents started together share a line, shown as
+`code-review ×10: …`), reads the session's transcripts — its own and its
+subagents' — for what each monitor and shell was started to do, and reports
+the result as `$bg1`..`$bg5` pane metadata.
 
 The watcher runs under a small supervisor that restarts it if it crashes or is
 killed, with a lock so only one runs per herdr server (each named session gets

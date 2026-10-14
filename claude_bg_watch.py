@@ -9,8 +9,9 @@ so herdr only ever sees one agent per pane. Every few seconds this watcher:
         ◯ general-purpose  Comparing task-runner signatures   3m 51s · ↓ 4k
     (subagent types and titles, and how many shells/monitors are live now);
   - reads the session transcript (pane pgid → <claude dir>/sessions/<pid>.json
-    → <claude dir>/projects/*/<sessionId>.jsonl) for what each monitor and
-    shell is: the description it was started with, minus the ones that ended;
+    → <claude dir>/projects/*/<sessionId>.jsonl) and its subagents'
+    (<sessionId>/subagents/*.jsonl) for what each monitor and shell is: the
+    description it was started with, minus the ones that ended;
 and reports it back as pane metadata:
   $bg1..$bg5    rows under the agent, one per subagent/monitor/shell, each led
                 by a fixed icon for its kind (◇ general-purpose, ⌕ Explore,
@@ -70,9 +71,13 @@ REFRESH_EVERY = 20
 RESTART_DELAY = 5
 
 MAIN_RE = re.compile(r"^\s*[⏺●◉]\s+main\s*$")
-AGENT_RE = re.compile(r"^(\s*)[◯○●⏺◐◉✻✽✶·]\s+(\S+)\s{2,}(.+?)(?:\s{2,}\S.*)?$")
+# "◯ general-purpose  Comparing signatures   3m 51s · ↓ 4k"; agents of one
+# type started together share a line: "◯ code-review (+9)  Awaiting results".
+AGENT_RE = re.compile(r"^(\s*)[◯○●⏺◐◉✻✽✶·]\s+(\S+)(?:\s+\(\+(\d+)\))?\s{2,}(.+?)(?:\s{2,}\S.*)?$")
 ELAPSED_RE = re.compile(r"\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s(?:\s+·.*)?$")
-COUNT_RE = re.compile(r"(\d+)\s+(shell|monitor)s?\b")
+# "1 shell · 2 monitors", or collapsed to "3 background" ("3 bg" when narrow).
+# "⧉ 2" in the same footer counts artifacts, not background work.
+COUNT_RE = re.compile(r"(\d+)\s+(shell|monitor|background|bg)s?\b")
 STARTED_RES = [
     (re.compile(r"Monitor started \(task (\w+)"), "monitor"),
     (re.compile(r"running in background with ID: (\w+)"), "shell"),
@@ -132,7 +137,7 @@ def parse_screen(screen):
     for line in reversed(lines):
         if "⏵⏵" in line or COUNT_RE.search(line) and " · " in line:
             for n, kind in COUNT_RE.findall(line):
-                counts[kind] = int(n)
+                counts["background" if kind == "bg" else kind] = int(n)
             break
     try:
         start = max(i for i, l in enumerate(lines) if MAIN_RE.match(l))
@@ -143,17 +148,19 @@ def parse_screen(screen):
         if not m:
             break
         # A truncated title ("…") leaves one space before the timer column.
-        agents.append((m.group(2), ELAPSED_RE.sub("", m.group(3)).strip()))
+        kind, more, title = m.group(2), m.group(3), ELAPSED_RE.sub("", m.group(4)).strip()
+        agents.append((kind, f"{kind} ×{int(more) + 1}: {title}" if more else title))
     return agents, counts
 
 
 class Transcript:
-    """Incrementally tracks a session's live monitors and background shells."""
+    """Incrementally reads one transcript's monitors and background shells."""
 
     def __init__(self, path):
         self.path, self.offset = path, 0
         self.uses = {}  # tool_use_id -> (description, command)
-        self.tasks = {}  # task id -> (kind, description), in start order
+        self.tasks = {}  # task id -> (kind, description, start epoch)
+        self.ended = set()  # task ids stopped or finished
         self.fired = {}  # task id -> epoch of the monitor's latest event
 
     def _text(self, content):
@@ -184,7 +191,7 @@ class Transcript:
                 if b.get("type") == "tool_use":
                     inp = b.get("input") or {}
                     if b.get("name") == "TaskStop":
-                        self.tasks.pop(inp.get("task_id") or inp.get("shell_id"), None)
+                        self.ended.add(inp.get("task_id") or inp.get("shell_id"))
                     self.uses[b.get("id")] = (inp.get("description") or "", inp.get("command") or "")
                 elif b.get("type") == "tool_result":
                     text = self._text(b.get("content"))
@@ -194,7 +201,7 @@ class Transcript:
                             desc, command = self.uses.get(b.get("tool_use_id"), ("", ""))
                             if SELF_NAME in command:
                                 kind = "self"  # this watcher, run from a Claude session
-                            self.tasks[m.group(1)] = (kind, desc)
+                            self.tasks[m.group(1)] = (kind, desc, when)
                             break
                     self._notifications(text, when)
                 elif b.get("type") == "text":
@@ -206,18 +213,43 @@ class Transcript:
         for chunk in text.split("<task-notification>")[1:]:
             tid, status = NOTIF_ID_RE.search(chunk), NOTIF_STATUS_RE.search(chunk)
             if tid and status:
-                self.tasks.pop(tid.group(1), None)
+                self.ended.add(tid.group(1))
             elif tid and when:
                 self.fired[tid.group(1)] = when
+
+
+class Session:
+    """A session's transcript plus its subagents' (<session>/subagents/*.jsonl):
+    a subagent's monitors and shells count in the same footer."""
+
+    def __init__(self, path):
+        self.path = path
+        self.subagents = os.path.join(os.path.splitext(path)[0], "subagents")
+        self.transcripts = {path: Transcript(path)}
+
+    def update(self):
+        for p in glob.glob(os.path.join(self.subagents, "*.jsonl")):
+            if p not in self.transcripts:
+                self.transcripts[p] = Transcript(p)
+        for t in self.transcripts.values():
+            t.update()
 
     def live(self, kind, n):
         """The n most recently started live tasks of a kind (the footer's count wins)."""
         if n <= 0:
             return []
-        return [(d, self.fired.get(tid, 0)) for tid, (k, d) in self.tasks.items() if k == kind][-n:]
+        ended = set().union(*(t.ended for t in self.transcripts.values()))
+        fired = {}
+        for t in self.transcripts.values():
+            fired.update(t.fired)
+        tasks = sorted((when, desc, fired.get(tid, 0))
+                       for t in self.transcripts.values()
+                       for tid, (k, desc, when) in t.tasks.items()
+                       if k == kind and tid not in ended)
+        return [(desc, last) for _, desc, last in tasks[-n:]]
 
 
-transcripts = {}
+sessions = {}
 
 
 def transcript_for(pane):
@@ -228,9 +260,9 @@ def transcript_for(pane):
         path = glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", f"{sid}.jsonl"))[0]
     except (ValueError, KeyError, OSError, IndexError):
         return None
-    t = transcripts.get(pane)
+    t = sessions.get(pane)
     if not t or t.path != path:  # /clear or a new session in the same pane
-        t = transcripts[pane] = Transcript(path)
+        t = sessions[pane] = Session(path)
     t.update()
     return t
 
@@ -275,6 +307,11 @@ def epoch(ts):
 def render(pane, agents, counts):
     """-> (items, label); items are (state, icon, text) rows under the agent."""
     t = transcript_for(pane) if counts else None
+    if t and "background" in counts and not {"shell", "monitor"} & set(counts):
+        # The collapsed footer doesn't say which kinds are running, so take the
+        # transcript's live ones, capped by its total.
+        for kind in ("monitor", "shell"):
+            counts[kind] = len(t.live(kind, counts["background"]))
     now = time.time()
     items = [("working", agent_glyph(kind), desc) for kind, desc in agents]
     for kind in ("monitor", "shell"):
