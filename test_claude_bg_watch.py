@@ -362,6 +362,81 @@ class Orphans(unittest.TestCase):
                          "⚠ orphaned: git 6d 166% CPU +1")
 
 
+def said(ts, effort, per_turn=None):
+    """An assistant entry as 2.1.300 writes it, with the session's /effort."""
+    return json.dumps({"type": "assistant", "timestamp": f"2026-10-14T10:{ts}Z", "effort": effort,
+                       "perTurnEffort": per_turn or effort,
+                       "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}})
+
+
+class Effort(unittest.TestCase):
+    """The state label "working" is colored by the session's effort level."""
+
+    def test_latest_turn_effort(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            with open(main, "w") as f:
+                f.write(said("00:00", "high") + "\n" + said("01:00", "high", "xhigh") + "\n")
+            s = w.Session(main)
+            s.update()
+            self.assertEqual(s.effort, "xhigh")
+            with open(main, "a") as f:
+                f.write(entry("02:00", result("u1", "a tool result")) + "\n")  # no effort: keep the last
+            s.update()
+            self.assertEqual(s.effort, "xhigh")
+
+    def test_an_active_subagents_higher_effort_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            subs = os.path.join(d, "sid", "subagents")
+            os.makedirs(subs)
+            with open(main, "w") as f:
+                f.write(said("00:00", "high") + "\n")
+
+            def sub(aid, effort, mtime=None):
+                log = os.path.join(subs, f"agent-{aid}.jsonl")
+                with open(log, "w") as f:
+                    f.write(said("00:30", effort) + "\n")
+                if mtime:
+                    os.utime(log, (mtime, mtime))
+
+            sub("a1", "medium")
+            sub("a2", "max", mtime=time.time() - 600)  # went quiet long ago
+            s = w.Session(main)
+            s.update()
+            self.assertEqual(s.effort, "high")
+            sub("a3", "xhigh")
+            s.update()
+            self.assertEqual(s.effort, "xhigh")
+            with open(main, "a") as f:
+                f.write(queued("02:00", "a3", "completed") + "\n")
+            s.update()
+            self.assertEqual(s.effort, "high")
+
+    def test_labels(self):
+        self.assertEqual(w.state_labels(None, None), [])
+        self.assertEqual(w.state_labels(None, "medium"), [])
+        self.assertEqual(w.state_labels(None, "high"), ["working=\u200bworking"])
+        self.assertEqual(w.state_labels("working", "xhigh"),
+                         ["idle=\u2060working", "done=\u2060working", "working=\u2060working"])
+        self.assertEqual(w.state_labels("working", "max"),
+                         ["idle=\u200cworking", "done=\u200cworking", "working=\u200cworking"])
+        self.assertEqual(w.state_labels("working", "low"), ["idle=working", "done=working"])
+
+    def test_report_sends_every_label_at_once_or_clears(self):
+        sent = []
+        orig = w.herdr
+        w.herdr = lambda *args: sent.append(args) or ""
+        try:
+            w.report("p1", [], None, "high")
+            w.report("p1", [], None, None)
+        finally:
+            w.herdr = orig
+        self.assertIn("working=\u200bworking", sent[0])
+        self.assertNotIn("--clear-state-labels", sent[0])
+        self.assertIn("--clear-state-labels", sent[1])
+
+
 class ShellAge(unittest.TestCase):
     """A background shell's row leads with how long it has run, so a hung one
     (a `gh run view` stuck for 13h) is told apart from a fresh one."""

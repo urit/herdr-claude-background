@@ -19,6 +19,9 @@ and reports it back as pane metadata:
                 shell's row then says how long it has run (▶ 13h …), as does
                 a workflow's (▣); armed cron jobs and /loop wakeups come next
                 (↻ every 5m …), then the artifacts the session watches (⊙)
+  state labels  "working" carries an invisible marker for the session's /effort
+                (high, xhigh, max), which config rules color red, grenadine
+                and magenta
   $orphans      on each workspace: processes started under Claude Code that
                 outlived their parent (⚠ orphaned: git 6d 167% CPU)
   state labels  idle/done read "working" while any of it runs
@@ -123,6 +126,13 @@ EVERY_RE = re.compile(r"^Every (?:(\d+) )?(minute|hour|day)s?$")
 # its color comes from an invisible leading marker matched by the rules in
 # config.toml.
 MARKER = {"working": "​", "watching": "⁠", "idle": ""}
+# The state label "working" leads with one of these per /effort level, for
+# the state_text rules in config.toml to color; lower levels keep herdr's.
+EFFORT_MARK = {"high": "\u200b", "xhigh": "\u2060", "max": "\u200c"}
+EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
+# A subagent counts toward the effort while its transcript was written this
+# recently and it hasn't reported finished (foreground ones never report).
+ACTIVE_FOR = 90
 MONITOR_FIRED_FOR = 60
 # One fixed icon per subagent type; types not listed hash into the pool, so a
 # given type always gets the same icon.
@@ -201,6 +211,7 @@ class Transcript:
         self.cron_fired = {}  # job id -> epoch it last fired
         self.wakeup = None  # pending /loop wakeup: (text, fires at, scheduled at)
         self.watched = {}  # artifact url -> (title, epoch the watch began)
+        self.effort = None  # /effort of the latest assistant turn
 
     def _text(self, content):
         if isinstance(content, str):
@@ -223,6 +234,8 @@ class Transcript:
             if entry.get("type") == "api-request-blob":
                 continue  # an untimed copy of a request whose entries come anyway
             when = epoch(entry.get("timestamp"))
+            if entry.get("type") == "assistant" and (entry.get("perTurnEffort") or entry.get("effort")):
+                self.effort = entry.get("perTurnEffort") or entry.get("effort")
             if entry.get("subtype") == "scheduled_task_fire":
                 self._fired(entry.get("taskId"), str(entry.get("content") or ""), when)
                 continue
@@ -368,6 +381,21 @@ class Session:
                        for tid, (k, desc, when) in t.tasks.items()
                        if k == kind and tid not in ended and when >= since)
         return [(desc, when, last) for when, desc, last in tasks[-n:]]
+
+    @property
+    def effort(self):
+        """The highest /effort of the session and its active subagents."""
+        ended, now = self._ended(), time.time()
+        levels = [self.transcripts[self.path].effort]
+        for path, t in self.transcripts.items():
+            aid = os.path.basename(path)[len("agent-"):-len(".jsonl")]
+            try:
+                if path != self.path and aid not in ended and now - os.path.getmtime(path) < ACTIVE_FOR:
+                    levels.append(t.effort)
+            except OSError:
+                continue
+        known = [lvl for lvl in levels if lvl in EFFORT_ORDER]
+        return max(known, key=EFFORT_ORDER.index) if known else None
 
     def watches(self):
         """Titles of the artifacts this Claude process watches, oldest first; a
@@ -600,7 +628,15 @@ def render(pane, agents, counts):
     return tuple(items), label
 
 
-def report(pane, items, label):
+def state_labels(label, effort):
+    """--state-label values: idle/done read `label` while background work runs,
+    and "working" leads with the effort marker, if any."""
+    mark = EFFORT_MARK.get(effort, "")
+    labels = [f"idle={mark}{label}", f"done={mark}{label}"] if label else []
+    return labels + ([f"working={mark}working"] if mark else [])
+
+
+def report(pane, items, label, effort=None):
     args = ["pane", "report-metadata", pane, "--source", SOURCE]
     for i in range(SLOTS):
         if i < len(items):
@@ -609,9 +645,11 @@ def report(pane, items, label):
             args += ["--token", f"bg{i + 1}={row}"]
         else:
             args += ["--clear-token", f"bg{i + 1}"]
-    if label:
-        args += ["--state-label", f"idle={label}", "--state-label", f"done={label}"]
-    else:
+    # A report replaces every label, and can't set some and clear others.
+    labels = state_labels(label, effort)
+    for value in labels:
+        args += ["--state-label", value]
+    if not labels:
         args += ["--clear-state-labels"]
     out = herdr(*args)
     if '"error"' in out:
@@ -652,7 +690,9 @@ def watch():
             for pane in panes:
                 screen = herdr("pane", "read", pane, "--source", "visible")
                 state = render(pane, *parse_screen(screen))
-                if not state[0]:
+                session = sessions.get(pane)
+                state = (*state, session.effort if session else None)
+                if not state[0] and state[2] not in EFFORT_MARK:
                     empty[pane] = empty.get(pane, 0) + 1
                     if pane not in shown or empty[pane] < CLEAR_AFTER:
                         continue
@@ -660,7 +700,7 @@ def watch():
                     empty[pane] = 0
                 if shown.get(pane) != state:
                     report(pane, *state)
-                    if state[0]:
+                    if state[0] or state[2] in EFFORT_MARK:
                         shown[pane] = state
                     else:
                         shown.pop(pane, None)

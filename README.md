@@ -33,6 +33,12 @@ Amber means working, teal is a monitor, cron job or artifact watch that is armed
 it runs, the agent's state reads `working` even when Claude itself is idle;
 an armed cron job or watched artifact alone doesn't count.
 
+The agent's `working` label is colored by the highest `/effort` running in
+it, its own or an active subagent's: red for `high`,
+grenadine for `xhigh`, magenta for `max` (lower levels keep the usual yellow).
+herdr can't recolor its own state icon by anything but state, so the word
+carries it.
+
 Under each workspace in the spaces list, a red row warns about processes that
 Claude Code started and that outlived whatever started them (a `nohup`ed
 command, a hung `git` whose Claude exited):

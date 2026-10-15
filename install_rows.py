@@ -36,6 +36,9 @@ LAYOUT = f"""claude = [
   ["state_icon", {{ token = "terminal_title_stripped", fg = "#cdd6f4", bold = true }}],
   [
     {{ token = "state_text", fg = "#6c7086", rules = [
+      {{ starts_with = "\\u200Bworking", fg = "#f04b4b" }},
+      {{ starts_with = "\\u2060working", fg = "#c71f4e" }},
+      {{ starts_with = "\\u200Cworking", fg = "#e64fd3" }},
       {{ starts_with = "working", fg = "#f9e2af" }},
       {{ starts_with = "blocked", fg = "#f38ba8", bold = true }},
       {{ starts_with = "done", fg = "#a6e3a1" }},
