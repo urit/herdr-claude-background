@@ -25,11 +25,25 @@ Each row starts with an icon for its kind and is colored by state:
 | `◎` | monitor |
 | `▶` | background shell, then how long it has run (`<1m`, `42m`, `13h`, `2d`) so a hung one stands out |
 | `↻` | armed cron job (`CronCreate`, a fixed-interval `/loop`) with its schedule, or a self-paced `/loop`'s next wakeup (`at 10:46`) |
+| `▣` | workflow (the Workflow tool), named after its script, with how long it has run |
+| `⊙` | artifacts this session watches for comments and new versions, collapsed into one row |
 
-Amber means working, teal is a monitor or cron job that is armed and waiting
+Amber means working, teal is a monitor, cron job or artifact watch that is armed and waiting
 (a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While any of
 it runs, the agent's state reads `working` even when Claude itself is idle;
-an armed cron job alone doesn't count.
+an armed cron job or watched artifact alone doesn't count.
+
+Under each workspace in the spaces list, a red row warns about processes that
+Claude Code started and that outlived whatever started them (a `nohup`ed
+command, a hung `git` whose Claude exited):
+
+```
+✓ workspace
+  ⚠ orphaned: git 6d 166% CPU +1
+```
+
+`herdr plugin action invoke urit.claude-background.orphans` lists them with
+their pids and the `kill` command.
 
 ## Install
 
@@ -45,6 +59,18 @@ machine. If you already have a `claude` entry under
 `[ui.sidebar.agents.rows_by_agent]`, it leaves it alone and prints the rows
 to paste into it (or run `python3 install_rows.py --print` in the plugin
 directory to see the whole layout).
+
+The orphan warning needs one row in `[ui.sidebar.spaces]`, which
+`install-rows` prints rather than writes (a spaces `rows` list replaces
+herdr's default one):
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "$orphans", fg = "#f38ba8" }],
+]
+```
 
 `start` is only needed the first time: after that, herdr starts the watcher
 every time its server starts.
@@ -62,7 +88,14 @@ subagents' — for what each monitor and shell was started to do, and reports
 the result as `$bg1`..`$bg5` pane metadata. When the subagent list is toggled
 off (`/tasks to see subagents`), the running background agents come from the
 transcripts instead: those started by the current Claude process with no
-final completion notice yet.
+final completion notice yet. Workflows, cron jobs, `/loop` wakeups and watched
+artifacts have no footer count, so they come from the transcripts only.
+
+About once a minute it also looks for orphans: processes whose environment
+says Claude Code started them (`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT`), whose
+parent is gone, and that have run for over 10 minutes, minus agents meant to
+outlive their parent (`gpg-agent`, `ssh-agent`, …). It reads only those two
+variables, and reports the result as `$orphans` workspace metadata.
 
 The watcher runs under a small supervisor that restarts it if it crashes or is
 killed, with a lock so only one runs per herdr server (each named session gets

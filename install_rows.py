@@ -27,6 +27,10 @@ BG_ROW = ('  [{ token = "$bg%d", fg = "#6c7086", rules = ['
           '{ starts_with = "\\u200B", fg = "#b7a788" }, '
           '{ starts_with = "\\u2060", fg = "#71a7a3" }] }],')
 BG_ROWS = "\n".join(BG_ROW % i for i in range(1, 6))
+# The workspace row for orphaned processes. A [ui.sidebar.spaces] rows list
+# replaces herdr's default one, so it is printed for adding by hand.
+ORPHANS_HINT = ('For orphaned-process warnings, add this row to [ui.sidebar.spaces] rows:\n'
+                '  [{ token = "$orphans", fg = "#f38ba8" }],')
 
 LAYOUT = f"""claude = [
   ["state_icon", {{ token = "terminal_title_stripped", fg = "#cdd6f4", bold = true }}],
@@ -75,6 +79,8 @@ def main():
     text = open(path).read() if os.path.exists(path) else ""
     if "$bg1" in text:
         print(f"{path} already has the background-work rows")
+        if "$orphans" not in text:
+            print(ORPHANS_HINT)
         return 0
     new = with_layout(text)
     if new is None:
@@ -97,6 +103,7 @@ def main():
             return 1
         subprocess.run([HERDR, "server", "reload-config"], capture_output=True)
     print(f"added the claude layout to {path}" + (f" (backup: {backup})" if backup else ""))
+    print(ORPHANS_HINT)
     return 0
 
 

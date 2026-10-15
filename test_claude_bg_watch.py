@@ -276,6 +276,92 @@ class CronJobs(unittest.TestCase):
                 w.transcript_for, w.time.time = orig
 
 
+class MoreBackgroundKinds(unittest.TestCase):
+    def session(self, d, *lines, started=0):
+        main = os.path.join(d, "sid.jsonl")
+        with open(main, "a") as f:
+            f.write("".join(line + "\n" for line in lines))
+        s = w.Session(main, started=started)
+        s.update()
+        return s
+
+    def test_shell_backgrounded_with_ctrl_b(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("u1", "Bash", description="Run the e2e suite", command="make e2e")),
+                entry("00:01", result("u1", "Command was manually backgrounded by user with ID: b7k2. "
+                                            "Output is being written to: /tmp/x.output.")))
+            self.assertEqual([d for d, _, _ in s.live("shell", 5)], ["Run the e2e suite"])
+
+    def test_workflow_named_after_its_script_until_it_ends(self):
+        script = "export const meta = {\n  name: 'review-changes',\n  description: 'Review changed files',\n}\n"
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("u1", "Workflow", script=script)),
+                entry("00:01", result("u1", "Workflow launched in background. Task ID: w4f9a. Watch it with /workflows.")),
+                entry("00:02", {"type": "tool_use", "id": "u2", "name": "Workflow", "input": {"name": "nightly-audit"}}),
+                entry("00:03", result("u2", "Workflow launched in a remote CCR session. Task ID: w8c1d.")))
+            started = w.epoch("2026-10-14T10:00:01Z")
+            orig = (w.transcript_for, w.time.time)
+            w.transcript_for = lambda pane: s
+            w.time.time = lambda: started + 600
+            try:
+                items, label = w.render("p1", [], {})
+            finally:
+                w.transcript_for, w.time.time = orig
+            self.assertEqual(items, (("working", "▣", "10m review-changes"), ("working", "▣", "9m nightly-audit")))
+            self.assertEqual(label, "working")
+            s = self.session(d, queued("05:00", "w4f9a", "completed"))
+            self.assertEqual([d for d, _, _ in s.live("workflow", 5)], ["nightly-audit"])
+
+    def test_artifact_watches_collapse_into_one_row(self):
+        url, deck = "https://claude.ai/artifact/TCHngRkrRv2yPEBotamMgg", "https://claude.ai/artifact/3bKYPdxpVd7urVa4gZmNeT"
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("a1", "Artifact", file_path="/tmp/scratch/ai-factory-plan.html", icon="factory")),
+                entry("00:01", result("a1", f"Published /tmp/scratch/ai-factory-plan.html at {url} (Version 1)\n\n"
+                                            "Live subscription: arming in the background — not connected yet")),
+                entry("00:02", use("a2", "Artifact", type_url="https://claude.ai/artifact/Rp9n", title="Q4 deck")),
+                entry("00:03", result("a2", f"Created a new Artifact at {deck} (version 1)\n\n"
+                                            "Live subscription: already connected from earlier in this session")),
+                entry("00:04", use("a3", "Artifact", action="read", url="https://claude.ai/artifact/other")),
+                entry("00:05", result("a3", "<html>Live subscription: arming</html>")))
+            self.assertEqual(s.watches(), ["ai-factory-plan", "Q4 deck"])
+            s = self.session(d, entry("01:00", use("a4", "ArtifactComments", action="unwatch", url=url)))
+            self.assertEqual(s.watches(), ["Q4 deck"])
+            s = self.session(d, started=w.epoch("2026-10-14T11:00:00Z"))
+            self.assertEqual(s.watches(), [])  # a live subscription ends with its process
+
+    def test_artifact_row_text(self):
+        self.assertEqual(w.watch_row(["plan"]), "watching plan")
+        self.assertEqual(w.watch_row(["plan", "Q4 deck", "x"]), "watching 3 artifacts: plan, Q4 deck, x")
+
+
+PS = """\
+50954     1 21:12:18   0.0 /usr/bin/Python claude_bg_watch.py --start CLAUDECODE=1 HOME=/u
+60372     1 06-03:24:12 166.5 /opt/homebrew/bin/git -c core.fsmonitor= fetch CLAUDE_CODE_ENTRYPOINT=sdk-cli HOME=/u
+86450     1 08-17:44:53   0.0 gpg-agent --homedir /u/.gnupg --daemon CLAUDECODE=1 HOME=/u
+70001     1    03:10   0.0 /bin/sleep 600 CLAUDECODE=1 HOME=/u
+70002     1  1-00:00:00   2.0 /usr/bin/ssh -N tunnel CLAUDECODE=1 HOME=/u
+70003   999  2-00:00:00   0.0 /bin/zsh -c x CLAUDECODE=1 HOME=/u
+70004     1  3-00:00:00   0.0 /usr/sbin/cfprefsd agent HOME=/u
+"""
+
+
+class Orphans(unittest.TestCase):
+    """Processes started under Claude Code that lost their parent: what a hung
+    marketplace `git` looked like after 6 days at 170% CPU."""
+
+    def test_orphans_from_ps(self):
+        self.assertEqual(w.orphans(PS), [("git", 60372, 530652, 166.5), ("ssh", 70002, 86400, 2.0)])
+
+    def test_orphan_row(self):
+        self.assertEqual(w.orphan_row([]), None)
+        self.assertEqual(w.orphan_row([("git", 60372, 530652, 166.5)]), "⚠ orphaned: git 6d 166% CPU")
+        self.assertEqual(w.orphan_row([("git", 60372, 530652, 166.5), ("ssh", 70002, 86400, 2.0)]),
+                         "⚠ orphaned: git 6d 166% CPU +1")
+
+
 class ShellAge(unittest.TestCase):
     """A background shell's row leads with how long it has run, so a hung one
     (a `gh run view` stuck for 13h) is told apart from a fresh one."""

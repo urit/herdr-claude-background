@@ -16,8 +16,11 @@ and reports it back as pane metadata:
   $bg1..$bg5    rows under the agent, one per subagent/monitor/shell, each led
                 by a fixed icon for its kind (◇ general-purpose, ⌕ Explore,
                 ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state; a
-                shell's row then says how long it has run (▶ 13h …); armed
-                cron jobs and /loop wakeups come last (↻ every 5m …)
+                shell's row then says how long it has run (▶ 13h …), as does
+                a workflow's (▣); armed cron jobs and /loop wakeups come next
+                (↻ every 5m …), then the artifacts the session watches (⊙)
+  $orphans      on each workspace: processes started under Claude Code that
+                outlived their parent (⚠ orphaned: git 6d 167% CPU)
   state labels  idle/done read "working" while any of it runs
 The rows are declared in herdr's config.toml (rows_by_agent.claude); the
 install-rows action adds them.
@@ -29,6 +32,7 @@ Usage:
   claude_bg_watch.py --stop    stop the supervisor; the watcher clears its rows
   claude_bg_watch.py --once    print what each Claude pane would show, and exit
   claude_bg_watch.py --clear   clear every row this plugin reported
+  claude_bg_watch.py --orphans list the orphaned processes, with their pids
 """
 import fcntl
 import glob
@@ -85,6 +89,8 @@ COUNT_RE = re.compile(r"(\d+)\s+(shell|monitor|background|bg)s?\b")
 STARTED_RES = [
     (re.compile(r"Monitor started \(task (\w+)"), "monitor"),
     (re.compile(r"(?:<bash-stdout>)?Command running in background with ID: (\w+)"), "shell"),
+    (re.compile(r"(?:<bash-stdout>)?Command was manually backgrounded by user with ID: (\w+)"), "shell"),
+    (re.compile(r"Workflow launched (?:in background|in a remote CCR session)\. Task ID: (\w+)"), "workflow"),
     (re.compile(r"(?:<bash-stdout>)?Command (?:did not complete .*? and )?was moved to the background \(ID: (\w+)\)"), "shell"),
 ]
 NOTIF_ID_RE = re.compile(r"<task-id>(\w+)</task-id>")
@@ -92,13 +98,24 @@ NOTIF_STATUS_RE = re.compile(r"<status>(\w+)</status>")
 # An agent waiting on background work of its own reports "completed" with this
 # note, then notifies again when it really finishes.
 INTERIM = "with background work of its own still running"
-GLYPH = {"monitor": "◎", "shell": "▶", "cron": "↻"}
+GLYPH = {"monitor": "◎", "shell": "▶", "cron": "↻", "workflow": "▣", "artifact": "⊙"}
+WORKFLOW_NAME_RE = re.compile(r"""\bname:\s*['"]([^'"]+)['"]""")
+# An Artifact publish result says whether this session now watches the page.
+WATCH_RE = re.compile(r"^(?:Live subscription: (?:arming|already connected|connected)"
+                      r"|Durable wake subscription registered)", re.M)
+ARTIFACT_URL_RE = re.compile(r"https://claude\.ai/(?:code/)?artifact/[\w-]+")
 # CronCreate's result, and ScheduleWakeup's (a self-paced /loop).
 CRON_RE = re.compile(r"Scheduled (recurring job|one-shot task) (\w+) \(([^)]*)\)")
 WAKEUP_RE = re.compile(r"Next wakeup scheduled for .*?\(in (\d+)s\)")
 LOOP_FIRE = "Claude resuming /loop wakeup"
 # Recurring jobs auto-expire this long after they are created.
 CRON_EXPIRES = 7 * 86400
+# Orphans: processes with Claude Code's environment whose parent is gone,
+# older than this, minus daemons that are meant to outlive what started them.
+ORPHAN_AFTER = 600
+ORPHAN_DAEMONS = {"gpg-agent", "ssh-agent", "scdaemon", "keyboxd", "dirmngr"}
+ORPHAN_ENV_RE = re.compile(r"(?:^|\s)(?:CLAUDECODE=1|CLAUDE_CODE_ENTRYPOINT=)")
+ORPHANS_EVERY = 20  # polls, about a minute
 EVERY_RE = re.compile(r"^Every (?:(\d+) )?(minute|hour|day)s?$")
 # Row color = state: subagents and shells are "working" while listed; a
 # monitor is "watching" while armed and "working" for a minute after it last
@@ -178,11 +195,12 @@ class Transcript:
         self.tasks = {}  # task id -> (kind, description, start epoch)
         self.ended = set()  # task ids stopped or finished
         self.fired = {}  # task id -> epoch of the monitor's latest event
-        self.inputs = {}  # tool_use_id -> input, for the scheduling tools
+        self.inputs = {}  # tool_use_id -> (tool name, input), for tools read from their result
         self.crons = {}  # job id -> (prompt, schedule, created, recurring, durable)
         self.cron_ended = set()  # job ids deleted or fired once
         self.cron_fired = {}  # job id -> epoch it last fired
         self.wakeup = None  # pending /loop wakeup: (text, fires at, scheduled at)
+        self.watched = {}  # artifact url -> (title, epoch the watch began)
 
     def _text(self, content):
         if isinstance(content, str):
@@ -226,13 +244,21 @@ class Transcript:
                         self.cron_ended.add(inp.get("id"))
                     elif b.get("name") == "ScheduleWakeup" and inp.get("stop"):
                         self.wakeup = None
-                    elif b.get("name") in ("CronCreate", "ScheduleWakeup"):
-                        self.inputs[b.get("id")] = inp
-                    self.uses[b.get("id")] = (inp.get("description") or "", inp.get("command") or "")
+                    elif b.get("name") == "ArtifactComments" and inp.get("action") == "unwatch" \
+                            or b.get("name") == "Artifact" and inp.get("action") == "delete":
+                        self.watched.pop(inp.get("url"), None)
+                    elif b.get("name") in ("CronCreate", "ScheduleWakeup", "Artifact"):
+                        self.inputs[b.get("id")] = (b.get("name"), inp)
+                    desc = workflow_name(inp) if b.get("name") == "Workflow" else inp.get("description") or ""
+                    self.uses[b.get("id")] = (desc, inp.get("command") or "")
                 elif b.get("type") == "tool_result":
                     text = self._text(b.get("content"))
                     if b.get("tool_use_id") in self.inputs:
-                        self._scheduled(self.inputs.pop(b.get("tool_use_id")), text, when)
+                        name, inp = self.inputs.pop(b.get("tool_use_id"))
+                        if name == "Artifact":
+                            self._published(inp, text, when)
+                        else:
+                            self._scheduled(inp, text, when)
                         continue
                     for rx, kind in STARTED_RES:
                         m = rx.match(text)
@@ -258,6 +284,18 @@ class Transcript:
             if prompt.startswith("<<"):  # an autonomous loop's sentinel says nothing
                 prompt = " ".join(str(inp.get("reason") or "").split())
             self.wakeup = (prompt, when + int(m.group(1)), when)
+
+    def _published(self, inp, text, when):
+        if inp.get("action") not in (None, "publish") or not WATCH_RE.search(text):
+            return
+        m = ARTIFACT_URL_RE.search(text)
+        url = m.group(0) if m else inp.get("url")
+        if not url:
+            return
+        path = inp.get("file_path") or ""
+        title = inp.get("title") or os.path.splitext(os.path.basename(path))[0] or url.rsplit("/", 1)[-1]
+        if url not in self.watched:
+            self.watched[url] = (title, when)
 
     def _fired(self, tid, content, when):
         if content.startswith(LOOP_FIRE):
@@ -316,7 +354,7 @@ class Session:
                 continue
         return [(kind, desc) for _, kind, desc in sorted(found, reverse=True)]
 
-    def live(self, kind, n):
+    def live(self, kind, n, since=0):
         """The n most recently started live tasks of a kind (the footer's count
         wins), as (description, start epoch, epoch it last fired)."""
         if n <= 0:
@@ -328,8 +366,16 @@ class Session:
         tasks = sorted((when, desc, fired.get(tid, 0))
                        for t in self.transcripts.values()
                        for tid, (k, desc, when) in t.tasks.items()
-                       if k == kind and tid not in ended)
+                       if k == kind and tid not in ended and when >= since)
         return [(desc, when, last) for when, desc, last in tasks[-n:]]
+
+    def watches(self):
+        """Titles of the artifacts this Claude process watches, oldest first; a
+        live subscription ends with the process."""
+        found = {}
+        for t in self.transcripts.values():
+            found.update(t.watched)
+        return [title for title, when in sorted(found.values(), key=lambda v: v[1]) if when >= self.started]
 
     def crons(self, now):
         """(state, text) of each armed cron job, oldest first, then the pending
@@ -419,6 +465,66 @@ def etime(text):
         return None
 
 
+def workflow_name(inp):
+    m = WORKFLOW_NAME_RE.search(str(inp.get("script") or ""))
+    if m:
+        return m.group(1)
+    return inp.get("name") or os.path.splitext(os.path.basename(inp.get("scriptPath") or ""))[0] or "workflow"
+
+
+def watch_row(titles):
+    if len(titles) == 1:
+        return f"watching {titles[0]}"
+    return f"watching {len(titles)} artifacts: {', '.join(titles)}"
+
+
+def orphans(ps_out):
+    """-> [(name, pid, seconds running, %cpu)], busiest first, from
+    `ps -A -E -ww -o pid=,ppid=,etime=,%cpu=,command=` (command then environment)."""
+    found = []
+    for line in ps_out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5 or parts[1] != "1" or not ORPHAN_ENV_RE.search(parts[4]):
+            continue
+        name = os.path.basename(parts[4].split()[0])
+        ran = etime(parts[2])
+        if name in ORPHAN_DAEMONS or SELF_NAME in parts[4] or ran is None or ran < ORPHAN_AFTER:
+            continue
+        try:
+            found.append((name, int(parts[0]), ran, float(parts[3])))
+        except ValueError:
+            continue
+    return sorted(found, key=lambda o: -o[3])
+
+
+def orphan_row(found):
+    if not found:
+        return None
+    name, _, ran, cpu = found[0]
+    more = f" +{len(found) - 1}" if len(found) > 1 else ""
+    return f"⚠ orphaned: {name} {age(ran)} {cpu:.0f}% CPU{more}"
+
+
+def find_orphans():
+    out = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "pid=,ppid=,etime=,%cpu=,command="],
+                         capture_output=True, text=True, timeout=10).stdout
+    return orphans(out)
+
+
+def report_orphans(row):
+    """Show the orphan warning on every workspace (they're machine-wide)."""
+    try:
+        spaces = json.loads(herdr("workspace", "list"))["result"]["workspaces"]
+    except (ValueError, KeyError, TypeError):
+        return
+    for ws in spaces:
+        args = ["workspace", "report-metadata", ws["workspace_id"], "--source", SOURCE]
+        args += ["--token", f"orphans={row}"] if row else ["--clear-token", "orphans"]
+        out = herdr(*args)
+        if '"error"' in out:
+            log(f"{ws['workspace_id']}: {out.strip()}")
+
+
 def every(schedule):
     """Compact cron schedule: "Every 5 minutes" -> "every 5m"; others as given."""
     m = EVERY_RE.match(schedule)
@@ -457,6 +563,9 @@ def render(pane, agents, counts):
         agents = t.agents()
     now = time.time()
     items = [("working", agent_glyph(kind), desc) for kind, desc in agents]
+    if t:  # the footer doesn't count workflows; this process's live ones
+        items += [("working", GLYPH["workflow"], f"{age(now - started)} {desc}")
+                  for desc, started, _ in t.live("workflow", SLOTS, since=t.started)]
     for kind in ("monitor", "shell"):
         n = counts.get(kind, 0)
         if kind == "shell" and t:
@@ -479,10 +588,13 @@ def render(pane, agents, counts):
         items += [("working", GLYPH[kind], f"{age(now - started)} {c}" if started else c)
                   for c, started in found]
         items += [("working", GLYPH[kind], f"background {kind}")] * (missing - len(found))
-    # An armed cron job alone doesn't make an idle agent "working".
+    # An armed cron job or a watched artifact alone doesn't make an idle agent "working".
     label = "working" if items else None
     if t:
         items += [(state, GLYPH["cron"], text) for state, text in t.crons(now)]
+        watched = t.watches()
+        if watched:
+            items.append(("watching", GLYPH["artifact"], watch_row(watched)))
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]
     return tuple(items), label
@@ -509,6 +621,7 @@ def report(pane, items, label):
 def clear_all(*_):
     for pane in claude_panes() or []:
         report(pane, [], None)
+    report_orphans(None)
     sys.exit(0)
 
 
@@ -518,7 +631,7 @@ def watch():
     # Start with every pane "shown" so rows left behind by a watcher that died
     # without clearing them (kill -9, crash) get cleared on the first quiet reads.
     shown, empty, down, last_error = {p: None for p in claude_panes() or []}, {}, 0, None
-    polls, parent = 0, os.getppid()
+    polls, parent, orphans_shown = 0, os.getppid(), ""  # "" = not reported yet
     while os.path.exists(__file__):  # gone = the plugin was uninstalled
         if os.getppid() != parent:  # the supervisor died; the next start brings a new pair
             log("supervisor gone; exiting")
@@ -535,7 +648,7 @@ def watch():
                 continue
             if down or polls % REFRESH_EVERY == 0:
                 # A restarted herdr server has none of the rows we reported.
-                shown, down = {p: None for p in panes}, 0
+                shown, down, orphans_shown = {p: None for p in panes}, 0, ""
             for pane in panes:
                 screen = herdr("pane", "read", pane, "--source", "visible")
                 state = render(pane, *parse_screen(screen))
@@ -553,6 +666,11 @@ def watch():
                         shown.pop(pane, None)
             for pane in set(shown) - set(panes):
                 shown.pop(pane, None)
+            if polls % ORPHANS_EVERY == 1:
+                row = orphan_row(find_orphans())
+                if row != orphans_shown:
+                    report_orphans(row)
+                    orphans_shown = row
             last_error = None
         except Exception as e:  # keep the loop alive across herdr restarts
             if repr(e) != last_error:
@@ -658,6 +776,11 @@ if __name__ == "__main__":
     elif arg == ["--once"]:
         for p in claude_panes() or []:
             print(p, render(p, *parse_screen(herdr("pane", "read", p, "--source", "visible"))))
+    elif arg == ["--orphans"]:
+        found = find_orphans()
+        for name, pid, ran, cpu in found:
+            print(f"{pid:>7}  {age(ran):>4}  {cpu:5.1f}% CPU  {name}")
+        print(f"kill {' '.join(str(o[1]) for o in found)}" if found else "no orphaned processes")
     elif arg == ["--clear"]:
         clear_all()
     elif not arg:

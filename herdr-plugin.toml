@@ -1,8 +1,8 @@
 id = "urit.claude-background"
 name = "Claude background work"
-version = "0.1.4"
+version = "0.2.0"
 min_herdr_version = "0.9.1"
-description = "Show each Claude Code agent's subagents, monitors and background shells as rows under it in the sidebar"
+description = "Show each Claude Code agent's subagents, monitors, shells, workflows, cron jobs and watched artifacts as rows under it in the sidebar, and warn about processes Claude left orphaned"
 platforms = ["macos", "linux"]
 
 # Starts a detached supervisor that keeps one watcher running for as long as
@@ -21,6 +21,12 @@ id = "stop"
 title = "Claude background work: stop"
 contexts = ["workspace"]
 command = ["python3", "claude_bg_watch.py", "--stop"]
+
+[[actions]]
+id = "orphans"
+title = "Claude background work: list orphaned processes"
+contexts = ["workspace"]
+command = ["python3", "claude_bg_watch.py", "--orphans"]
 
 [[actions]]
 id = "install-rows"
