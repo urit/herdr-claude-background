@@ -52,6 +52,13 @@ command, a hung `git` whose Claude exited):
 `herdr plugin action invoke urit.claude-background.orphans` lists them with
 their pids and the `kill` command.
 
+## Requirements
+
+- herdr 0.9.1 or newer
+- Claude Code
+- Python 3.12, as `python3` on the `PATH` herdr runs with
+- macOS or Linux
+
 ## Install
 
 ```sh
@@ -81,9 +88,6 @@ rows = [
 
 `start` is only needed the first time: after that, herdr starts the watcher
 every time its server starts.
-
-Requires herdr 0.9.1 or newer, `python3` (3.8+) on the `PATH` herdr runs
-with, and Claude Code. macOS and Linux.
 
 ## How it works
 
