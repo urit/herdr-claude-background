@@ -413,6 +413,24 @@ class Effort(unittest.TestCase):
             s.update()
             self.assertEqual(s.effort, "high")
 
+    def test_a_main_session_waiting_on_subagents_takes_their_effort(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            subs = os.path.join(d, "sid", "subagents")
+            os.makedirs(subs)
+            with open(main, "w") as f:
+                f.write(said("00:00", "high") + "\n")
+            os.utime(main, (time.time() - 600,) * 2)  # waiting, not writing
+            with open(os.path.join(subs, "agent-a1.jsonl"), "w") as f:
+                f.write(said("00:30", "medium") + "\n")
+            s = w.Session(main)
+            s.update()
+            self.assertEqual(s.effort, "medium")
+            os.remove(os.path.join(subs, "agent-a1.jsonl"))
+            s = w.Session(main)
+            s.update()
+            self.assertEqual(s.effort, "high")  # nothing active: the session's own
+
     def test_labels(self):
         self.assertEqual(w.state_labels(None, None), [])
         self.assertEqual(w.state_labels(None, "medium"), [])

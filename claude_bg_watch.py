@@ -384,18 +384,21 @@ class Session:
 
     @property
     def effort(self):
-        """The highest /effort of the session and its active subagents."""
-        ended, now = self._ended(), time.time()
-        levels = [self.transcripts[self.path].effort]
+        """The highest /effort among what is running now: the session itself
+        while it writes, and active subagents. A session only waiting on its
+        subagents takes theirs; with nothing active, its own."""
+        ended, now, levels = self._ended(), time.time(), []
         for path, t in self.transcripts.items():
             aid = os.path.basename(path)[len("agent-"):-len(".jsonl")]
             try:
-                if path != self.path and aid not in ended and now - os.path.getmtime(path) < ACTIVE_FOR:
+                if aid not in ended and now - os.path.getmtime(path) < ACTIVE_FOR:
                     levels.append(t.effort)
             except OSError:
                 continue
         known = [lvl for lvl in levels if lvl in EFFORT_ORDER]
-        return max(known, key=EFFORT_ORDER.index) if known else None
+        if not known:
+            return self.transcripts[self.path].effort
+        return max(known, key=EFFORT_ORDER.index)
 
     def watches(self):
         """Titles of the artifacts this Claude process watches, oldest first; a

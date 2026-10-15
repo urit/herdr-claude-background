@@ -34,7 +34,8 @@ it runs, the agent's state reads `working` even when Claude itself is idle;
 an armed cron job or watched artifact alone doesn't count.
 
 The agent's `working` label is colored by the highest `/effort` running in
-it, its own or an active subagent's: red for `high`,
+it right now (the session while it writes, and active subagents; a session
+only waiting on its subagents takes theirs): red for `high`,
 grenadine for `xhigh`, magenta for `max` (lower levels keep the usual yellow).
 herdr can't recolor its own state icon by anything but state, so the word
 carries it.
