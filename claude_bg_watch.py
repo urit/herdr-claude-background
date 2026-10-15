@@ -15,7 +15,8 @@ so herdr only ever sees one agent per pane. Every few seconds this watcher:
 and reports it back as pane metadata:
   $bg1..$bg5    rows under the agent, one per subagent/monitor/shell, each led
                 by a fixed icon for its kind (◇ general-purpose, ⌕ Explore,
-                ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state
+                ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state; a
+                shell's row then says how long it has run (▶ 13h …)
   state labels  idle/done read "working" while any of it runs
 The rows are declared in herdr's config.toml (rows_by_agent.claude); the
 install-rows action adds them.
@@ -78,10 +79,12 @@ ELAPSED_RE = re.compile(r"\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s(?:\s+·.*)?$")
 # "1 shell · 2 monitors", or collapsed to "3 background" ("3 bg" when narrow).
 # "⧉ 2" in the same footer counts artifacts, not background work.
 COUNT_RE = re.compile(r"(\d+)\s+(shell|monitor|background|bg)s?\b")
+# Matched at the start of a tool result only: a foreground command's output
+# can quote these lines, and such a task would never end.
 STARTED_RES = [
     (re.compile(r"Monitor started \(task (\w+)"), "monitor"),
-    (re.compile(r"running in background with ID: (\w+)"), "shell"),
-    (re.compile(r"moved to the background \(ID: (\w+)\)"), "shell"),
+    (re.compile(r"(?:<bash-stdout>)?Command running in background with ID: (\w+)"), "shell"),
+    (re.compile(r"(?:<bash-stdout>)?Command (?:did not complete .*? and )?was moved to the background \(ID: (\w+)\)"), "shell"),
 ]
 NOTIF_ID_RE = re.compile(r"<task-id>(\w+)</task-id>")
 NOTIF_STATUS_RE = re.compile(r"<status>(\w+)</status>")
@@ -205,7 +208,7 @@ class Transcript:
                 elif b.get("type") == "tool_result":
                     text = self._text(b.get("content"))
                     for rx, kind in STARTED_RES:
-                        m = rx.search(text)
+                        m = rx.match(text)
                         if m:
                             desc, command = self.uses.get(b.get("tool_use_id"), ("", ""))
                             if SELF_NAME in command:
@@ -265,7 +268,8 @@ class Session:
         return [(kind, desc) for _, kind, desc in sorted(found, reverse=True)]
 
     def live(self, kind, n):
-        """The n most recently started live tasks of a kind (the footer's count wins)."""
+        """The n most recently started live tasks of a kind (the footer's count
+        wins), as (description, start epoch, epoch it last fired)."""
         if n <= 0:
             return []
         ended = self._ended()
@@ -276,7 +280,7 @@ class Session:
                        for t in self.transcripts.values()
                        for tid, (k, desc, when) in t.tasks.items()
                        if k == kind and tid not in ended)
-        return [(desc, last) for _, desc, last in tasks[-n:]]
+        return [(desc, when, last) for when, desc, last in tasks[-n:]]
 
 
 sessions = {}
@@ -311,22 +315,47 @@ def claude_pid(pane):
 
 
 def shell_commands(pane):
-    """Commands of the background shells Claude is running, oldest first.
+    """(command, start epoch) of the background shells Claude is running, oldest first.
 
     Claude starts each as a child `zsh -c "… && eval '<command>' < /dev/null …"`.
     """
     pid = claude_pid(pane)
     if not pid:
         return []
-    out = subprocess.run(["ps", "-A", "-ww", "-o", "ppid=,command="],
-                         capture_output=True, text=True).stdout
-    cmds = []
+    out = subprocess.run(["ps", "-A", "-ww", "-o", "ppid=,etime=,command="],
+                         capture_output=True, text=True, timeout=10).stdout
+    now, cmds = time.time(), []
     for line in out.splitlines():
-        ppid, _, command = line.strip().partition(" ")
+        ppid, elapsed, command = (line.split(None, 2) + ["", ""])[:3]
         m = EVAL_RE.search(command)
         if ppid == str(pid) and m and "shell-snapshots" in command:
-            cmds.append(m.group(1).replace("'\\''", "'").replace(os.path.expanduser("~"), "~"))
-    return cmds
+            ran = etime(elapsed)
+            cmds.append((m.group(1).replace("'\\''", "'").replace(os.path.expanduser("~"), "~"),
+                         now - ran if ran is not None else None))
+    return sorted(cmds, key=lambda c: c[1] or 0)
+
+
+def etime(text):
+    """Seconds from ps's elapsed time ([[dd-]hh:]mm:ss), or None."""
+    days, _, rest = text.rpartition("-")
+    try:
+        secs = 0
+        for part in rest.split(":"):
+            secs = secs * 60 + int(part)
+        return secs + int(days or 0) * 86400
+    except ValueError:
+        return None
+
+
+def age(seconds):
+    """Compact age for a row: <1m, 59m, 13h, 2d."""
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 48 * 3600:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
 
 
 def epoch(ts):
@@ -356,17 +385,21 @@ def render(pane, agents, counts):
             # The footer counts this watcher too when a session started it.
             n -= len(t.live("self", n))
         named = t.live(kind, n) if t else []
-        for desc, fired in named:
+        for desc, started, fired in named:
             state = "working"
             if kind == "monitor" and now - fired > MONITOR_FIRED_FOR:
                 state = "watching"
-            items.append((state, GLYPH[kind], desc or f"background {kind}"))
+            text = desc or f"background {kind}"
+            if kind == "shell" and started:
+                text = f"{age(now - started)} {text}"
+            items.append((state, GLYPH[kind], text))
         # Counted in the footer but not found in the transcript: name shells
         # after the command their process is running, else stay generic.
         missing = n - len(named)
         found = shell_commands(pane)[-missing:] if kind == "shell" and missing > 0 else []
-        found = [c for c in found if SELF_NAME not in c][:missing]
-        items += [("working", GLYPH[kind], c) for c in found]
+        found = [(c, started) for c, started in found if SELF_NAME not in c][:missing]
+        items += [("working", GLYPH[kind], f"{age(now - started)} {c}" if started else c)
+                  for c, started in found]
         items += [("working", GLYPH[kind], f"background {kind}")] * (missing - len(found))
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]

@@ -83,9 +83,9 @@ class SessionTasks(unittest.TestCase):
                 f.write(entry("01:03", result("u3", "Command running in background with ID: s1. Output")) + "\n")
             session = w.Session(main)
             session.update()
-            self.assertEqual([d for d, _ in session.live("monitor", 5)], ["main monitor", "subagent monitor"])
-            self.assertEqual([d for d, _ in session.live("shell", 5)], ["subagent shell"])
-            self.assertEqual([d for d, _ in session.live("monitor", 1)], ["subagent monitor"])
+            self.assertEqual([d for d, _, _ in session.live("monitor", 5)], ["main monitor", "subagent monitor"])
+            self.assertEqual(session.live("shell", 5), [("subagent shell", w.epoch("2026-10-14T10:01:03Z"), 0)])
+            self.assertEqual([d for d, _, _ in session.live("monitor", 1)], ["subagent monitor"])
             with open(main, "a") as f:  # the main agent stops the subagent's shell
                 f.write(entry("02:00", use("u4", "TaskStop", task_id="s1")) + "\n")
             session.update()
@@ -118,7 +118,7 @@ class QueuedNotifications(unittest.TestCase):
                        queued("00:30", "m1"))
             session = w.Session(main)
             session.update()
-            [(desc, fired)] = session.live("monitor", 5)
+            [(desc, _, fired)] = session.live("monitor", 5)
             self.assertEqual(desc, "watch CI")
             self.assertEqual(fired, w.epoch("2026-10-14T10:00:30Z"))
             self.write(main, queued("01:00", "m1", "completed"), mode="a")
@@ -154,6 +154,59 @@ class QueuedNotifications(unittest.TestCase):
             self.write(main, queued("02:00", "a3", "completed"), mode="a")
             session.update()
             self.assertEqual([desc for _, desc in session.agents()], ["Verify M1 refresh race"])
+
+
+class StartedOnlyAtResultStart(unittest.TestCase):
+    """A foreground command whose output quotes a start line (grep over this
+    repo's tests) once became a shell that never ended, hiding a real one."""
+
+    def test_quoted_start_line_is_not_a_task(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            with open(main, "w") as f:
+                f.write(entry("00:00", use("u1", "Bash", description="grep tests", command="grep -n ID test_claude_bg_watch.py")) + "\n")
+                f.write(entry("00:01", result("u1", '17: result("u3", "Command running in background with ID: s1. Output")')) + "\n")
+                f.write(entry("00:02", use("u2", "Bash", description="slow build", command="make")) + "\n")
+                f.write(entry("00:03", result("u2", "<bash-stdout>Command did not complete within its 120s timeout "
+                                                    "and was moved to the background (ID: b2)")) + "\n")
+            session = w.Session(main)
+            session.update()
+            self.assertEqual(session.live("self", 5), [])
+            self.assertEqual([d for d, _, _ in session.live("shell", 5)], ["slow build"])
+
+
+class ShellAge(unittest.TestCase):
+    """A background shell's row leads with how long it has run, so a hung one
+    (a `gh run view` stuck for 13h) is told apart from a fresh one."""
+
+    def test_age(self):
+        self.assertEqual([w.age(s) for s in (5, 59, 60, 59 * 60 + 59, 3600, 13 * 3600 + 1800, 49 * 3600)],
+                         ["<1m", "<1m", "1m", "59m", "1h", "13h", "2d"])
+
+    def test_etime(self):
+        self.assertEqual([w.etime(s) for s in ("00:07", "12:34", "01:02:03", "2-01:02:03", "bad")],
+                         [7, 754, 3723, 176523, None])
+
+    def test_shell_rows_lead_with_age(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            with open(main, "w") as f:
+                f.write(entry("00:00", use("u1", "Bash", description="Watch the promotion", command="./watch.sh")) + "\n")
+                f.write(entry("00:01", result("u1", "Command running in background with ID: s1. Output")) + "\n")
+            session = w.Session(main)
+            session.update()
+            started = w.epoch("2026-10-14T10:00:01Z")
+            orig = (w.transcript_for, w.shell_commands, w.time.time)
+            w.transcript_for = lambda pane: session
+            w.shell_commands = lambda pane: [("gh run view 123 --log-failed", started - 600)]
+            w.time.time = lambda: started + 13 * 3600
+            try:
+                items, _ = w.render("p1", [], {"shell": 3})
+            finally:
+                w.transcript_for, w.shell_commands, w.time.time = orig
+            self.assertEqual(items, (("working", "▶", "13h Watch the promotion"),
+                                     ("working", "▶", "13h gh run view 123 --log-failed"),
+                                     ("working", "▶", "background shell")))
 
 
 if __name__ == "__main__":

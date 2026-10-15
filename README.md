@@ -13,7 +13,7 @@ that often looks idle while work is still going on:
   ◇ Comparing task-runner signatures
   ⌕ Find every caller of report()
   ◎ CI run for the auth PR
-  ▶ npm test -- --watch
+  ▶ 13h npm test -- --watch
 ```
 
 Each row starts with an icon for its kind and is colored by state:
@@ -22,7 +22,7 @@ Each row starts with an icon for its kind and is colored by state:
 | --- | --- |
 | `◇` `⌕` `▤` `⑂` … | subagent (general-purpose, Explore, Plan, fork; other types get a fixed icon of their own) |
 | `◎` | monitor |
-| `▶` | background shell |
+| `▶` | background shell, then how long it has run (`<1m`, `42m`, `13h`, `2d`) so a hung one stands out |
 
 Amber means working, teal is a monitor that is armed and waiting, grey is
 idle. Up to five rows are shown; past that, the fifth reads `+N more`. While any of
