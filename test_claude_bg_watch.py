@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 import claude_bg_watch as w
@@ -173,6 +174,106 @@ class StartedOnlyAtResultStart(unittest.TestCase):
             session.update()
             self.assertEqual(session.live("self", 5), [])
             self.assertEqual([d for d, _, _ in session.live("shell", 5)], ["slow build"])
+
+
+def fire(ts, tid, content="Running scheduled task (Oct 14 10:05am)"):
+    """A cron or /loop wakeup firing, as Claude Code 2.1.300 writes it."""
+    return json.dumps({"type": "system", "subtype": "scheduled_task_fire", "taskId": tid,
+                       "timestamp": f"2026-10-14T10:{ts}Z", "content": content})
+
+
+class CronJobs(unittest.TestCase):
+    """CronCreate jobs and /loop wakeups: armed until deleted, fired (one-shot),
+    expired, or the Claude process that held them exits."""
+
+    def session(self, d, *lines, started=0):
+        main = os.path.join(d, "sid.jsonl")
+        with open(main, "a") as f:
+            f.write("".join(line + "\n" for line in lines))
+        s = w.Session(main, started=started)
+        s.update()
+        return s
+
+    def test_recurring_job_until_deleted(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("c1", "CronCreate", cron="*/5 * * * *", recurring=True,
+                                   prompt="Check Slack for new messages\nthat need Uri")),
+                entry("00:01", result("c1", "Scheduled recurring job bf6b5dca (Every 5 minutes). Next run: Oct 15 "
+                                            "10:21am. Session-only (not written to disk, dies when Claude exits). "
+                                            "Auto-expires after 7 days. Use CronDelete to cancel sooner.")))
+            now = w.epoch("2026-10-14T10:02:00Z")
+            self.assertEqual(s.crons(now), [("watching", "every 5m Check Slack for new messages that need Uri")])
+            s = self.session(d, fire("05:00", "bf6b5dca"))
+            self.assertEqual(s.crons(now + 190)[0][0], "working")  # fired 10s ago
+            self.assertEqual(s.crons(now + 300)[0][0], "watching")
+            self.assertEqual(s.crons(now + 8 * 86400), [])  # auto-expired
+            s = self.session(d, entry("06:00", use("c2", "CronDelete", id="bf6b5dca")))
+            self.assertEqual(s.crons(now), [])
+
+    def test_request_blob_copies_are_skipped(self):
+        """2.1.300 also writes the request, tool results included, as an
+        untimed api-request-blob entry before the real one."""
+        with tempfile.TemporaryDirectory() as d:
+            text = "Scheduled recurring job bf6b5dca (Every 5 minutes). Auto-expires after 7 days."
+            blob = json.dumps({"type": "api-request-blob", "sessionId": "sid", "hash": "28d8",
+                               "message": {"role": "user", "content": [result("c1", text)]}})
+            s = self.session(d,
+                entry("00:00", use("c1", "CronCreate", cron="*/5 * * * *", prompt="Check Slack")),
+                blob, entry("00:01", result("c1", text)),
+                started=w.epoch("2026-10-14T09:00:00Z"))
+            self.assertEqual(s.crons(w.epoch("2026-10-14T10:02:00Z")), [("watching", "every 5m Check Slack")])
+
+    def test_one_shot_ends_when_it_fires(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("c1", "CronCreate", cron="30 10 14 10 *", recurring=False, prompt="Remind me")),
+                entry("00:01", result("c1", "Scheduled one-shot task 1a2b3c4d (At 10:30 AM, on day 14 of the month, "
+                                            "only in October). It will fire once then auto-delete.")))
+            now = w.epoch("2026-10-14T10:02:00Z")
+            self.assertEqual(s.crons(now), [("watching", "At 10:30 AM, on day 14 of the month, only in October Remind me")])
+            s = self.session(d, fire("30:00", "1a2b3c4d"))
+            self.assertEqual(s.crons(now), [])
+
+    def test_session_only_jobs_die_with_their_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("c1", "CronCreate", cron="*/5 * * * *", prompt="old")),
+                entry("00:01", result("c1", "Scheduled recurring job aaaa1111 (Every 5 minutes). Auto-expires after 7 days.")),
+                entry("00:02", use("c2", "CronCreate", cron="0 9 * * *", prompt="kept", durable=True)),
+                entry("00:03", result("c2", "Scheduled recurring job bbbb2222 (Every day at 9:00 AM). Auto-expires after 7 days.")),
+                started=w.epoch("2026-10-14T10:30:00Z"))
+            self.assertEqual(s.crons(w.epoch("2026-10-14T10:31:00Z")), [("watching", "Every day at 9:00 AM kept")])
+
+    def test_loop_wakeup_until_it_fires_or_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("u1", "ScheduleWakeup", delaySeconds=1200, reason="fallback", prompt="/work-the-board")),
+                entry("00:01", result("u1", "Next wakeup scheduled for 13:20:00 (in 1199s). Nothing more to do this turn.")))
+            now = w.epoch("2026-10-14T10:02:00Z")
+            at = time.strftime("%H:%M", time.localtime(w.epoch("2026-10-14T10:20:00Z")))
+            self.assertEqual(s.crons(now), [("watching", f"at {at} /work-the-board")])
+            s = self.session(d, fire("20:00", "fc394f03", "Claude resuming /loop wakeup (Oct 14 1:20pm)"))
+            self.assertEqual(s.crons(now), [])
+            s = self.session(d,
+                entry("21:00", use("u2", "ScheduleWakeup", delaySeconds=60, reason="tick", prompt="<<autonomous-loop-dynamic>>")),
+                entry("21:01", result("u2", "Next wakeup scheduled for 13:22:01 (in 60s).")))
+            self.assertEqual([t for _, t in s.crons(now)], [f"at {time.strftime('%H:%M', time.localtime(w.epoch('2026-10-14T10:22:01Z')))} tick"])
+            s = self.session(d, entry("21:30", use("u3", "ScheduleWakeup", stop=True)))
+            self.assertEqual(s.crons(now), [])
+
+    def test_cron_rows_do_not_make_an_idle_agent_working(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("c1", "CronCreate", cron="*/5 * * * *", prompt="Check Slack")),
+                entry("00:01", result("c1", "Scheduled recurring job bf6b5dca (Every 5 minutes). Auto-expires after 7 days.")))
+            orig = (w.transcript_for, w.time.time)
+            w.transcript_for = lambda pane: s
+            w.time.time = lambda: w.epoch("2026-10-14T10:02:00Z")
+            try:
+                self.assertEqual(w.render("p1", [], {}), ((("watching", "↻", "every 5m Check Slack"),), None))
+            finally:
+                w.transcript_for, w.time.time = orig
 
 
 class ShellAge(unittest.TestCase):

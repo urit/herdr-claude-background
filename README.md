@@ -14,6 +14,7 @@ that often looks idle while work is still going on:
   ⌕ Find every caller of report()
   ◎ CI run for the auth PR
   ▶ 13h npm test -- --watch
+  ↻ every 5m Check Slack for new messages
 ```
 
 Each row starts with an icon for its kind and is colored by state:
@@ -23,10 +24,12 @@ Each row starts with an icon for its kind and is colored by state:
 | `◇` `⌕` `▤` `⑂` … | subagent (general-purpose, Explore, Plan, fork; other types get a fixed icon of their own) |
 | `◎` | monitor |
 | `▶` | background shell, then how long it has run (`<1m`, `42m`, `13h`, `2d`) so a hung one stands out |
+| `↻` | armed cron job (`CronCreate`, a fixed-interval `/loop`) with its schedule, or a self-paced `/loop`'s next wakeup (`at 10:46`) |
 
-Amber means working, teal is a monitor that is armed and waiting, grey is
-idle. Up to five rows are shown; past that, the fifth reads `+N more`. While any of
-it runs, the agent's state reads `working` even when Claude itself is idle.
+Amber means working, teal is a monitor or cron job that is armed and waiting
+(a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While any of
+it runs, the agent's state reads `working` even when Claude itself is idle;
+an armed cron job alone doesn't count.
 
 ## Install
 

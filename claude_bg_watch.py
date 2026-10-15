@@ -16,7 +16,8 @@ and reports it back as pane metadata:
   $bg1..$bg5    rows under the agent, one per subagent/monitor/shell, each led
                 by a fixed icon for its kind (◇ general-purpose, ⌕ Explore,
                 ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state; a
-                shell's row then says how long it has run (▶ 13h …)
+                shell's row then says how long it has run (▶ 13h …); armed
+                cron jobs and /loop wakeups come last (↻ every 5m …)
   state labels  idle/done read "working" while any of it runs
 The rows are declared in herdr's config.toml (rows_by_agent.claude); the
 install-rows action adds them.
@@ -91,7 +92,14 @@ NOTIF_STATUS_RE = re.compile(r"<status>(\w+)</status>")
 # An agent waiting on background work of its own reports "completed" with this
 # note, then notifies again when it really finishes.
 INTERIM = "with background work of its own still running"
-GLYPH = {"monitor": "◎", "shell": "▶"}
+GLYPH = {"monitor": "◎", "shell": "▶", "cron": "↻"}
+# CronCreate's result, and ScheduleWakeup's (a self-paced /loop).
+CRON_RE = re.compile(r"Scheduled (recurring job|one-shot task) (\w+) \(([^)]*)\)")
+WAKEUP_RE = re.compile(r"Next wakeup scheduled for .*?\(in (\d+)s\)")
+LOOP_FIRE = "Claude resuming /loop wakeup"
+# Recurring jobs auto-expire this long after they are created.
+CRON_EXPIRES = 7 * 86400
+EVERY_RE = re.compile(r"^Every (?:(\d+) )?(minute|hour|day)s?$")
 # Row color = state: subagents and shells are "working" while listed; a
 # monitor is "watching" while armed and "working" for a minute after it last
 # fired an event. herdr draws " · " between tokens, so a row is one token and
@@ -170,6 +178,11 @@ class Transcript:
         self.tasks = {}  # task id -> (kind, description, start epoch)
         self.ended = set()  # task ids stopped or finished
         self.fired = {}  # task id -> epoch of the monitor's latest event
+        self.inputs = {}  # tool_use_id -> input, for the scheduling tools
+        self.crons = {}  # job id -> (prompt, schedule, created, recurring, durable)
+        self.cron_ended = set()  # job ids deleted or fired once
+        self.cron_fired = {}  # job id -> epoch it last fired
+        self.wakeup = None  # pending /loop wakeup: (text, fires at, scheduled at)
 
     def _text(self, content):
         if isinstance(content, str):
@@ -189,7 +202,12 @@ class Transcript:
                 entry = json.loads(raw)
             except ValueError:
                 continue
+            if entry.get("type") == "api-request-blob":
+                continue  # an untimed copy of a request whose entries come anyway
             when = epoch(entry.get("timestamp"))
+            if entry.get("subtype") == "scheduled_task_fire":
+                self._fired(entry.get("taskId"), str(entry.get("content") or ""), when)
+                continue
             if entry.get("type") == "queue-operation":
                 # Task notifications are queued as entries of their own.
                 self._notifications(self._text(entry.get("content")), when)
@@ -204,9 +222,18 @@ class Transcript:
                     inp = b.get("input") or {}
                     if b.get("name") == "TaskStop":
                         self.ended.add(inp.get("task_id") or inp.get("shell_id"))
+                    elif b.get("name") == "CronDelete":
+                        self.cron_ended.add(inp.get("id"))
+                    elif b.get("name") == "ScheduleWakeup" and inp.get("stop"):
+                        self.wakeup = None
+                    elif b.get("name") in ("CronCreate", "ScheduleWakeup"):
+                        self.inputs[b.get("id")] = inp
                     self.uses[b.get("id")] = (inp.get("description") or "", inp.get("command") or "")
                 elif b.get("type") == "tool_result":
                     text = self._text(b.get("content"))
+                    if b.get("tool_use_id") in self.inputs:
+                        self._scheduled(self.inputs.pop(b.get("tool_use_id")), text, when)
+                        continue
                     for rx, kind in STARTED_RES:
                         m = rx.match(text)
                         if m:
@@ -218,6 +245,28 @@ class Transcript:
                     self._notifications(text, when)
                 elif b.get("type") == "text":
                     self._notifications(b.get("text") or "", when)
+
+    def _scheduled(self, inp, text, when):
+        prompt = " ".join(str(inp.get("prompt") or "").split())
+        m = CRON_RE.match(text)
+        if m:
+            self.crons[m.group(2)] = (prompt, m.group(3), when, m.group(1) == "recurring job",
+                                      bool(inp.get("durable")))
+            return
+        m = WAKEUP_RE.match(text)
+        if m and when:
+            if prompt.startswith("<<"):  # an autonomous loop's sentinel says nothing
+                prompt = " ".join(str(inp.get("reason") or "").split())
+            self.wakeup = (prompt, when + int(m.group(1)), when)
+
+    def _fired(self, tid, content, when):
+        if content.startswith(LOOP_FIRE):
+            self.wakeup = None  # the loop's next turn schedules the one after
+            return
+        self.cron_fired[tid] = when
+        job = self.crons.get(tid)
+        if job and not job[3]:
+            self.cron_ended.add(tid)  # a one-shot task deletes itself once it fires
 
     def _notifications(self, text, when):
         # Each <task-notification> with a <status> means that task is over;
@@ -281,6 +330,29 @@ class Session:
                        for tid, (k, desc, when) in t.tasks.items()
                        if k == kind and tid not in ended)
         return [(desc, when, last) for when, desc, last in tasks[-n:]]
+
+    def crons(self, now):
+        """(state, text) of each armed cron job, oldest first, then the pending
+        /loop wakeup. Session-only jobs die with the Claude process that made
+        them, so an earlier process's are gone."""
+        ended, fired, jobs = set(), {}, []
+        for t in self.transcripts.values():
+            ended |= t.cron_ended
+            fired.update(t.cron_fired)
+            jobs += t.crons.items()
+        rows = []
+        for jid, (prompt, schedule, created, recurring, durable) in sorted(jobs, key=lambda j: j[1][2]):
+            if jid in ended or (created < self.started and not durable):
+                continue
+            if recurring and now - created > CRON_EXPIRES:
+                continue
+            state = "working" if 0 <= now - fired.get(jid, 0) <= MONITOR_FIRED_FOR else "watching"
+            rows.append((state, f"{every(schedule)} {prompt}".strip()))
+        wakeup = self.transcripts[self.path].wakeup
+        if wakeup and wakeup[2] >= self.started:
+            at = time.strftime("%H:%M", time.localtime(wakeup[1]))
+            rows.append(("watching", f"at {at} {wakeup[0]}".strip()))
+        return rows
 
 
 sessions = {}
@@ -347,6 +419,12 @@ def etime(text):
         return None
 
 
+def every(schedule):
+    """Compact cron schedule: "Every 5 minutes" -> "every 5m"; others as given."""
+    m = EVERY_RE.match(schedule)
+    return f"every {m.group(1) or 1}{m.group(2)[0]}" if m else schedule
+
+
 def age(seconds):
     """Compact age for a row: <1m, 59m, 13h, 2d."""
     if seconds < 60:
@@ -367,7 +445,7 @@ def epoch(ts):
 
 def render(pane, agents, counts):
     """-> (items, label); items are (state, icon, text) rows under the agent."""
-    t = transcript_for(pane) if counts else None
+    t = transcript_for(pane)  # cron jobs have no footer count, so always read it
     if t and "background" in counts and not {"shell", "monitor"} & set(counts):
         # The collapsed footer doesn't say which kinds are running, so take the
         # transcript's live ones, capped by its total.
@@ -401,9 +479,13 @@ def render(pane, agents, counts):
         items += [("working", GLYPH[kind], f"{age(now - started)} {c}" if started else c)
                   for c, started in found]
         items += [("working", GLYPH[kind], f"background {kind}")] * (missing - len(found))
+    # An armed cron job alone doesn't make an idle agent "working".
+    label = "working" if items else None
+    if t:
+        items += [(state, GLYPH["cron"], text) for state, text in t.crons(now)]
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]
-    return tuple(items), "working" if items else None
+    return tuple(items), label
 
 
 def report(pane, items, label):
