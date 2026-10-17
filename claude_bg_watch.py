@@ -79,7 +79,8 @@ HERDR_GONE = 3
 REFRESH_EVERY = 20
 RESTART_DELAY = 5
 
-MAIN_RE = re.compile(r"^\s*[⏺●◉]\s+main\s*$")
+# main is hollow (◯) while a subagent's view is open.
+MAIN_RE = re.compile(r"^\s*[⏺●◉◯○]\s+main\s*$")
 # "◯ general-purpose  Comparing signatures   3m 51s · ↓ 4k"; agents of one
 # type started together share a line: "◯ code-review (+9)  Awaiting results".
 AGENT_RE = re.compile(r"^(\s*)[◯○●⏺◐◉✻✽✶·]\s+(\S+)(?:\s+\(\+(\d+)\))?\s{2,}(.+?)(?:\s{2,}\S.*)?$")

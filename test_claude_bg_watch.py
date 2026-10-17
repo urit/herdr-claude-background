@@ -41,6 +41,24 @@ class ParseScreen(unittest.TestCase):
         self.assertEqual(agents, [("code-review", "code-review ×10: Awaiting finder angle results")])
         self.assertEqual(counts, {}, "⧉ 2 counts artifacts, not background work")
 
+    def test_viewing_a_subagent(self):
+        # Claude Code 2.1.302: while a subagent's view is open, main goes hollow
+        # and the viewed agent is the filled one.
+        agents, counts = w.parse_screen(screen(
+            "  ⏵⏵ bypass permissions on · 1 shell · ⧉ 6 · ← 1 agent",
+            "",
+            "  ◯ main",
+            "  ⏺ general-purpose  Initializing ai-factory-explained HyperFrames project"
+            "              2m 38s · ↓ 138.4k tokens",
+            "  ◯ general-purpose  Reading ensure_ops in run_cli.py"
+            "                                    1m 52s · ↓ 96.4k tokens",
+        ))
+        self.assertEqual(counts, {"shell": 1})
+        self.assertEqual(agents, [
+            ("general-purpose", "Initializing ai-factory-explained HyperFrames project"),
+            ("general-purpose", "Reading ensure_ops in run_cli.py"),
+        ])
+
     def test_collapsed_background_count(self):
         _, counts = w.parse_screen(screen("  ⏵⏵ bypass permissions on · 3 bg · ← 1 agent"))
         self.assertEqual(counts, {"background": 3})
