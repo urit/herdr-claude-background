@@ -29,9 +29,10 @@ Each row starts with an icon for its kind and is colored by state:
 | `⊙` | artifacts this session watches for comments and new versions, collapsed into one row |
 
 Amber means working, teal is a monitor, cron job or artifact watch that is armed and waiting
-(a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While any of
-it runs, the agent's state reads `working` even when Claude itself is idle;
-an armed cron job or watched artifact alone doesn't count.
+(a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While a subagent, workflow or working shell runs, the agent's state reads
+`working` even when Claude itself is idle. Things that only wait don't count:
+monitors, cron jobs, watched artifacts, and shells that wait (`Wait for …`,
+`Watch …`, `until …; do sleep`, `tail -f`, `caffeinate`), whose rows are teal.
 
 The agent's `working` label is colored by the highest `/effort` running in
 it right now (the session while it writes, and active subagents; a session

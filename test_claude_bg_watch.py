@@ -455,6 +455,58 @@ class Effort(unittest.TestCase):
         self.assertIn("--clear-state-labels", sent[1])
 
 
+class Waiters(unittest.TestCase):
+    """Watcher shells and monitors wait, so they don't make an idle agent read
+    "working"; their rows are teal. Work shells and subagents still do."""
+
+    def render(self, *lines, counts, ps=()):
+        with tempfile.TemporaryDirectory() as d:
+            main = os.path.join(d, "sid.jsonl")
+            with open(main, "w") as f:
+                f.write("".join(line + "\n" for line in lines))
+            s = w.Session(main)
+            s.update()
+            orig = (w.transcript_for, w.shell_commands, w.time.time)
+            w.transcript_for = lambda pane: s
+            w.shell_commands = lambda pane: list(ps)
+            w.time.time = lambda: w.epoch("2026-10-14T10:10:00Z")
+            try:
+                return w.render("p1", [], counts)
+            finally:
+                w.transcript_for, w.shell_commands, w.time.time = orig
+
+    def shell(self, uid, ts, desc, command="x"):
+        return (entry(ts, use(uid, "Bash", description=desc, command=command)),
+                entry(ts, result(uid, f"Command running in background with ID: {uid}. Output")))
+
+    def test_watcher_shell_and_monitor_leave_the_agent_idle(self):
+        items, label = self.render(*self.shell("s1", "00:00", "Re-arm the failure watch, ignoring pauses made by hand"),
+                                   entry("00:01", use("m1", "Monitor", description="CI for PR 556")),
+                                   entry("00:02", result("m1", "Monitor started (task m1, timeout 3600000ms)")),
+                                   counts={"shell": 1, "monitor": 1})
+        self.assertEqual(label, None)
+        self.assertEqual([state for state, _, _ in items], ["watching", "watching"])
+
+    def test_work_shell_still_working(self):
+        items, label = self.render(*self.shell("s1", "00:00", "Run the e2e suite", "make e2e"), counts={"shell": 1})
+        self.assertEqual((label, items[0][0]), ("working", "working"))
+
+    def test_waiting_told_by_command_too(self):
+        items, label = self.render(*self.shell("s1", "00:00", "PR 556 checks", "until gh pr checks 556; do sleep 30; done"),
+                                   counts={"shell": 2},
+                                   ps=[("tail -f /tmp/deploy.log", w.epoch("2026-10-14T10:00:00Z"))])
+        self.assertEqual(label, None)
+        self.assertEqual([state for state, _, _ in items], ["watching", "watching"])
+
+    def test_is_waiter(self):
+        for text in ("Wait for PR 556 checks to finish", "Watch drill run until it finishes",
+                     "Keep the Mac awake for the tick", "Run the watcher for this session only",
+                     "Poll the deploy", "caffeinate -i python3 board.py"):
+            self.assertTrue(w.is_waiter(text), text)
+        for text in ("Run the e2e suite", "Review stacks#514 deletion diff", "make check"):
+            self.assertFalse(w.is_waiter(text), text)
+
+
 class ShellAge(unittest.TestCase):
     """A background shell's row leads with how long it has run, so a hung one
     (a `gh run view` stuck for 13h) is told apart from a fresh one."""
@@ -484,7 +536,7 @@ class ShellAge(unittest.TestCase):
                 items, _ = w.render("p1", [], {"shell": 3})
             finally:
                 w.transcript_for, w.shell_commands, w.time.time = orig
-            self.assertEqual(items, (("working", "▶", "13h Watch the promotion"),
+            self.assertEqual(items, (("watching", "▶", "13h Watch the promotion"),
                                      ("working", "▶", "13h gh run view 123 --log-failed"),
                                      ("working", "▶", "background shell")))
 

@@ -129,6 +129,10 @@ MARKER = {"working": "​", "watching": "⁠", "idle": ""}
 # The state label "working" leads with one of these per /effort level, for
 # the state_text rules in config.toml to color; lower levels keep herdr's.
 EFFORT_MARK = {"high": "\u200b", "xhigh": "\u2060", "max": "\u200c"}
+# A shell that waits rather than works (a watch loop, a poll, caffeinate):
+# teal, and like a monitor it doesn't make an idle agent read "working".
+WAITER_RE = re.compile(r"^\s*(?:wait|watch|poll|keep|re-arm)|\b(?:wait(?:s|ing)?|watch(?:es|er|ing)?|poll(?:s|ing)?)\b"
+                       r"|\buntil\b|\bwhile\b.*\bsleep\b|\btail -f\b|--watch\b|\bcaffeinate\b", re.I)
 EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
 # A subagent counts toward the effort while its transcript was written this
 # recently and it hasn't reported finished (foreground ones never report).
@@ -206,6 +210,7 @@ class Transcript:
         self.ended = set()  # task ids stopped or finished
         self.fired = {}  # task id -> epoch of the monitor's latest event
         self.inputs = {}  # tool_use_id -> (tool name, input), for tools read from their result
+        self.waiting = set()  # descriptions of shells whose description or command waits
         self.crons = {}  # job id -> (prompt, schedule, created, recurring, durable)
         self.cron_ended = set()  # job ids deleted or fired once
         self.cron_fired = {}  # job id -> epoch it last fired
@@ -280,6 +285,8 @@ class Transcript:
                             if SELF_NAME in command:
                                 kind = "self"  # this watcher, run from a Claude session
                             self.tasks[m.group(1)] = (kind, desc, when)
+                            if is_waiter(desc) or is_waiter(command):
+                                self.waiting.add(desc)
                             break
                     self._notifications(text, when)
                 elif b.get("type") == "text":
@@ -556,6 +563,10 @@ def report_orphans(row):
             log(f"{ws['workspace_id']}: {out.strip()}")
 
 
+def is_waiter(text):
+    return bool(text and WAITER_RE.search(text))
+
+
 def every(schedule):
     """Compact cron schedule: "Every 5 minutes" -> "every 5m"; others as given."""
     m = EVERY_RE.match(schedule)
@@ -594,6 +605,7 @@ def render(pane, agents, counts):
         agents = t.agents()
     now = time.time()
     items = [("working", agent_glyph(kind), desc) for kind, desc in agents]
+    waiting = set().union(*(tr.waiting for tr in t.transcripts.values())) if t else set()
     if t:  # the footer doesn't count workflows; this process's live ones
         items += [("working", GLYPH["workflow"], f"{age(now - started)} {desc}")
                   for desc, started, _ in t.live("workflow", SLOTS, since=t.started)]
@@ -605,7 +617,8 @@ def render(pane, agents, counts):
         named = t.live(kind, n) if t else []
         for desc, started, fired in named:
             state = "working"
-            if kind == "monitor" and now - fired > MONITOR_FIRED_FOR:
+            if kind == "monitor" and now - fired > MONITOR_FIRED_FOR \
+                    or kind == "shell" and (desc in waiting or is_waiter(desc)):
                 state = "watching"
             text = desc or f"background {kind}"
             if kind == "shell" and started:
@@ -616,11 +629,14 @@ def render(pane, agents, counts):
         missing = n - len(named)
         found = shell_commands(pane)[-missing:] if kind == "shell" and missing > 0 else []
         found = [(c, started) for c, started in found if SELF_NAME not in c][:missing]
-        items += [("working", GLYPH[kind], f"{age(now - started)} {c}" if started else c)
-                  for c, started in found]
+        items += [("watching" if is_waiter(c) else "working", GLYPH[kind],
+                   f"{age(now - started)} {c}" if started else c) for c, started in found]
         items += [("working", GLYPH[kind], f"background {kind}")] * (missing - len(found))
-    # An armed cron job or a watched artifact alone doesn't make an idle agent "working".
-    label = "working" if items else None
+    # Only work relabels an idle agent "working": subagents, workflows and
+    # shells that aren't waiters. Monitors, waiter shells, cron jobs and
+    # watched artifacts wait, so the agent keeps its own idle/done.
+    busy = any(state == "working" and icon != GLYPH["monitor"] for state, icon, _ in items)
+    label = "working" if busy else None
     if t:
         items += [(state, GLYPH["cron"], text) for state, text in t.crons(now)]
         watched = t.watches()
