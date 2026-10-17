@@ -59,6 +59,17 @@ class ParseScreen(unittest.TestCase):
             ("general-purpose", "Reading ensure_ops in run_cli.py"),
         ])
 
+    def test_selection_cursor_in_agent_list(self):
+        # Arrowing down into the list puts ❯ before the selected line.
+        for selected in (0, 1):
+            lines = ["  ⏺ main",
+                     "  ◯ general-purpose  Reading spatial-pan-stations.md blueprint"
+                     "                           9m 9s · ↓ 210.5k tokens"]
+            lines[selected] = "❯" + lines[selected][1:]
+            agents, _ = w.parse_screen(screen(
+                "  ⏵⏵ bypass permissions on · 1 shell · ⧉ 6 · ← 1 agent", "", *lines))
+            self.assertEqual(agents, [("general-purpose", "Reading spatial-pan-stations.md blueprint")])
+
     def test_collapsed_background_count(self):
         _, counts = w.parse_screen(screen("  ⏵⏵ bypass permissions on · 3 bg · ← 1 agent"))
         self.assertEqual(counts, {"background": 3})

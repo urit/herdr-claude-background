@@ -79,11 +79,12 @@ HERDR_GONE = 3
 REFRESH_EVERY = 20
 RESTART_DELAY = 5
 
-# main is hollow (◯) while a subagent's view is open.
-MAIN_RE = re.compile(r"^\s*[⏺●◉◯○]\s+main\s*$")
+# main is hollow (◯) while a subagent's view is open, and any line of the list
+# can carry the ❯ selection cursor.
+MAIN_RE = re.compile(r"^\s*(?:❯\s*)?[⏺●◉◯○]\s+main\s*$")
 # "◯ general-purpose  Comparing signatures   3m 51s · ↓ 4k"; agents of one
 # type started together share a line: "◯ code-review (+9)  Awaiting results".
-AGENT_RE = re.compile(r"^(\s*)[◯○●⏺◐◉✻✽✶·]\s+(\S+)(?:\s+\(\+(\d+)\))?\s{2,}(.+?)(?:\s{2,}\S.*)?$")
+AGENT_RE = re.compile(r"^(\s*)(?:❯\s*)?[◯○●⏺◐◉✻✽✶·]\s+(\S+)(?:\s+\(\+(\d+)\))?\s{2,}(.+?)(?:\s{2,}\S.*)?$")
 ELAPSED_RE = re.compile(r"\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s(?:\s+·.*)?$")
 # "1 shell · 2 monitors", or collapsed to "3 background" ("3 bg" when narrow).
 # "⧉ 2" in the same footer counts artifacts, not background work.

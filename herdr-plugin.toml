@@ -1,6 +1,6 @@
 id = "urit.claude-background"
 name = "Claude background work"
-version = "0.3.2"
+version = "0.3.3"
 min_herdr_version = "0.9.1"
 description = "Show each Claude Code agent's subagents, monitors, shells, workflows, cron jobs and watched artifacts as rows under it in the sidebar, and warn about processes Claude left orphaned"
 platforms = ["macos", "linux"]
