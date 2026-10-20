@@ -109,6 +109,7 @@ WORKFLOW_NAME_RE = re.compile(r"""\bname:\s*['"]([^'"]+)['"]""")
 WATCH_RE = re.compile(r"^(?:Live subscription: (?:arming|already connected|connected)"
                       r"|Durable wake subscription registered)", re.M)
 ARTIFACT_URL_RE = re.compile(r"https://claude\.ai/(?:code/)?artifact/[\w-]+")
+TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 # CronCreate's result, and ScheduleWakeup's (a self-paced /loop).
 CRON_RE = re.compile(r"Scheduled (recurring job|one-shot task) (\w+) \(([^)]*)\)")
 WAKEUP_RE = re.compile(r"Next wakeup scheduled for .*?\(in (\d+)s\)")
@@ -315,7 +316,12 @@ class Transcript:
         if not url:
             return
         path = inp.get("file_path") or ""
-        title = inp.get("title") or os.path.splitext(os.path.basename(path))[0] or url.rsplit("/", 1)[-1]
+        # A ticket key in the title or the page's folder/file (start-IN-3087/review.html) names it best.
+        folder, name = os.path.basename(os.path.dirname(path)), os.path.splitext(os.path.basename(path))[0]
+        ticket = TICKET_RE.search(f"{inp.get('title') or ''} {folder} {name}")
+        if name in ("review", "index"):
+            name = folder
+        title = ticket.group(0) if ticket else inp.get("title") or name or url.rsplit("/", 1)[-1]
         if url not in self.watched:
             self.watched[url] = (title, when)
 
@@ -513,9 +519,7 @@ def workflow_name(inp):
 
 
 def watch_row(titles):
-    if len(titles) == 1:
-        return f"watching {titles[0]}"
-    return f"watching {len(titles)} artifacts: {', '.join(titles)}"
+    return f"waiting review {', '.join(dict.fromkeys(titles))}"
 
 
 def orphans(ps_out):

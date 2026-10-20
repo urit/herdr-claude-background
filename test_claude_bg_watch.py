@@ -361,9 +361,24 @@ class MoreBackgroundKinds(unittest.TestCase):
             s = self.session(d, started=w.epoch("2026-10-14T11:00:00Z"))
             self.assertEqual(s.watches(), [])  # a live subscription ends with its process
 
+    def test_artifact_named_by_its_ticket(self):
+        # start-ticket writes every plan page to review.html in a start-<ticket> folder.
+        url = "https://claude.ai/artifact/2y8s7jNHabBDAR1xEyUbeB"
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("a1", "Artifact", file_path="/tmp/claude-502/scratchpad/start-IN-3087/review.html")),
+                entry("00:01", result("a1", f"Published /tmp/start-IN-3087/review.html at {url} (Version 1)\n\n"
+                                            "Live subscription: arming in the background — not connected yet")))
+            self.assertEqual(s.watches(), ["IN-3087"])
+            s = self.session(d,
+                entry("01:00", use("a2", "Artifact", file_path="/tmp/scratchpad/deck-test/review.html")),
+                entry("01:01", result("a2", "Published /tmp/deck-test/review.html at https://claude.ai/artifact/YKuw\n\n"
+                                            "Live subscription: arming in the background")))
+            self.assertEqual(s.watches(), ["IN-3087", "deck-test"])
+
     def test_artifact_row_text(self):
-        self.assertEqual(w.watch_row(["plan"]), "watching plan")
-        self.assertEqual(w.watch_row(["plan", "Q4 deck", "x"]), "watching 3 artifacts: plan, Q4 deck, x")
+        self.assertEqual(w.watch_row(["IN-3087"]), "waiting review IN-3087")
+        self.assertEqual(w.watch_row(["IN-2920", "Q4 deck", "IN-2920"]), "waiting review IN-2920, Q4 deck")
 
 
 PS = """\
