@@ -355,11 +355,11 @@ class MoreBackgroundKinds(unittest.TestCase):
                                             "Live subscription: already connected from earlier in this session")),
                 entry("00:04", use("a3", "Artifact", action="read", url="https://claude.ai/artifact/other")),
                 entry("00:05", result("a3", "<html>Live subscription: arming</html>")))
-            self.assertEqual(s.watches(), ["ai-factory-plan", "Q4 deck"])
+            self.assertEqual([t for _, t in s.watches()], ["ai-factory-plan", "Q4 deck"])
             s = self.session(d, entry("01:00", use("a4", "ArtifactComments", action="unwatch", url=url)))
-            self.assertEqual(s.watches(), ["Q4 deck"])
+            self.assertEqual([t for _, t in s.watches()], ["Q4 deck"])
             s = self.session(d, started=w.epoch("2026-10-14T11:00:00Z"))
-            self.assertEqual(s.watches(), [])  # a live subscription ends with its process
+            self.assertEqual([t for _, t in s.watches()], [])  # a live subscription ends with its process
 
     def test_artifact_named_by_its_ticket(self):
         # start-ticket writes every plan page to review.html in a start-<ticket> folder.
@@ -369,12 +369,33 @@ class MoreBackgroundKinds(unittest.TestCase):
                 entry("00:00", use("a1", "Artifact", file_path="/tmp/claude-502/scratchpad/start-IN-3087/review.html")),
                 entry("00:01", result("a1", f"Published /tmp/start-IN-3087/review.html at {url} (Version 1)\n\n"
                                             "Live subscription: arming in the background — not connected yet")))
-            self.assertEqual(s.watches(), ["IN-3087"])
+            self.assertEqual([t for _, t in s.watches()], ["IN-3087"])
             s = self.session(d,
                 entry("01:00", use("a2", "Artifact", file_path="/tmp/scratchpad/deck-test/review.html")),
                 entry("01:01", result("a2", "Published /tmp/deck-test/review.html at https://claude.ai/artifact/YKuw\n\n"
                                             "Live subscription: arming in the background")))
-            self.assertEqual(s.watches(), ["IN-3087", "deck-test"])
+            self.assertEqual([t for _, t in s.watches()], ["IN-3087", "deck-test"])
+
+    def test_artifact_row_only_while_its_tab_is_open(self):
+        open_url, closed_url = "https://claude.ai/artifact/5rKoYo4ojduC5J8ev5zrdW", "https://claude.ai/artifact/2y8s7jNHabBDAR1xEyUbeB"
+        with tempfile.TemporaryDirectory() as d:
+            s = self.session(d,
+                entry("00:00", use("a1", "Artifact", file_path="/tmp/start-IN-2920/review.html")),
+                entry("00:01", result("a1", f"Published at {open_url}\n\nLive subscription: arming")),
+                entry("00:02", use("a2", "Artifact", file_path="/tmp/start-IN-3087/review.html")),
+                entry("00:03", result("a2", f"Published at {closed_url}\n\nLive subscription: arming")))
+            orig = (w.transcript_for, w.open_artifacts)
+            w.transcript_for = lambda pane: s
+            try:
+                # Chrome's tab URL carries a share key after the id.
+                w.open_artifacts = lambda: set(w.ARTIFACT_ID_RE.findall(f"{open_url}?sk=ZuKK, https://x.test"))
+                self.assertEqual(w.render("p1", [], {})[0], (("watching", "⊙", "waiting review IN-2920"),))
+                w.open_artifacts = lambda: set()  # Chrome closed
+                self.assertEqual(w.render("p1", [], {})[0], ())
+                w.open_artifacts = lambda: None  # Chrome can't be asked: show them all
+                self.assertEqual(w.render("p1", [], {})[0], (("watching", "⊙", "waiting review IN-2920, IN-3087"),))
+            finally:
+                w.transcript_for, w.open_artifacts = orig
 
     def test_artifact_row_text(self):
         self.assertEqual(w.watch_row(["IN-3087"]), "waiting review IN-3087")

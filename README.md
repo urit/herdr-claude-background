@@ -26,7 +26,7 @@ Each row starts with an icon for its kind and is colored by state:
 | `▶` | background shell, then how long it has run (`<1m`, `42m`, `13h`, `2d`) so a hung one stands out |
 | `↻` | armed cron job (`CronCreate`, a fixed-interval `/loop`) with its schedule, or a self-paced `/loop`'s next wakeup (`at 10:46`) |
 | `▣` | workflow (the Workflow tool), named after its script, with how long it has run |
-| `⊙` | "waiting review": artifacts this session watches for comments and new versions, named by their ticket key when the page path has one, collapsed into one row |
+| `⊙` | "waiting review": artifacts this session watches for comments and new versions and that are open in a Chrome tab, named by their ticket key when the page path has one, collapsed into one row |
 
 Amber means working, teal is a monitor, cron job or artifact watch that is armed and waiting
 (a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While a subagent, workflow or working shell runs, the agent's state reads
@@ -40,6 +40,21 @@ only waiting on its subagents takes theirs): red for `high`,
 grenadine for `xhigh`, magenta for `max` (lower levels keep the usual yellow).
 herdr can't recolor its own state icon by anything but state, so the word
 carries it.
+
+A watched page whose browser tab you closed drops out of the `⊙` row; the
+session itself stays subscribed, so a later comment still reaches it. The
+plugin reads Chrome's tab URLs with `osascript`, which macOS asks you to allow
+once. Where Chrome can't be asked (permission refused, Linux), every watched
+page is shown. Sidebar rows can't be links, so the `open-review` action opens
+the focused agent's watched pages instead; bind it to a key in `config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+u"
+type = "plugin_action"
+command = "urit.claude-background.open-review"
+description = "open the agent's review pages"
+```
 
 Under each workspace in the spaces list, a red row warns about processes that
 Claude Code started and that outlived whatever started them (a `nohup`ed

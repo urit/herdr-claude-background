@@ -18,7 +18,8 @@ and reports it back as pane metadata:
                 ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state; a
                 shell's row then says how long it has run (▶ 13h …), as does
                 a workflow's (▣); armed cron jobs and /loop wakeups come next
-                (↻ every 5m …), then the artifacts the session watches (⊙)
+                (↻ every 5m …), then the artifacts the session watches that
+                are open in a Chrome tab (⊙ waiting review IN-3087)
   state labels  "working" carries an invisible marker for the session's /effort
                 (high, xhigh, max), which config rules color red, grenadine
                 and magenta
@@ -35,6 +36,8 @@ Usage:
   claude_bg_watch.py --stop    stop the supervisor; the watcher clears its rows
   claude_bg_watch.py --once    print what each Claude pane would show, and exit
   claude_bg_watch.py --clear   clear every row this plugin reported
+  claude_bg_watch.py --open-review  open the focused agent's watched pages
+                               (the open-review action)
   claude_bg_watch.py --orphans list the orphaned processes, with their pids
 """
 import fcntl
@@ -109,7 +112,12 @@ WORKFLOW_NAME_RE = re.compile(r"""\bname:\s*['"]([^'"]+)['"]""")
 WATCH_RE = re.compile(r"^(?:Live subscription: (?:arming|already connected|connected)"
                       r"|Durable wake subscription registered)", re.M)
 ARTIFACT_URL_RE = re.compile(r"https://claude\.ai/(?:code/)?artifact/[\w-]+")
+ARTIFACT_ID_RE = re.compile(r"claude\.ai/(?:code/)?artifact/([\w-]+)")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+CHROME_TABS = ('if application "Google Chrome" is running then '
+               'tell application "Google Chrome" to get URL of every tab of every window')
+TABS_RETRY = 60  # seconds before asking Chrome again after it refused
+_tabs = [0, None]  # [epoch asked, open artifact ids]
 # CronCreate's result, and ScheduleWakeup's (a self-paced /loop).
 CRON_RE = re.compile(r"Scheduled (recurring job|one-shot task) (\w+) \(([^)]*)\)")
 WAKEUP_RE = re.compile(r"Next wakeup scheduled for .*?\(in (\d+)s\)")
@@ -416,12 +424,13 @@ class Session:
         return max(known, key=EFFORT_ORDER.index)
 
     def watches(self):
-        """Titles of the artifacts this Claude process watches, oldest first; a
-        live subscription ends with the process."""
+        """(url, title) of the artifacts this Claude process watches, oldest
+        first; a live subscription ends with the process."""
         found = {}
         for t in self.transcripts.values():
             found.update(t.watched)
-        return [title for title, when in sorted(found.values(), key=lambda v: v[1]) if when >= self.started]
+        return [(url, title) for url, (title, when) in sorted(found.items(), key=lambda v: v[1][1])
+                if when >= self.started]
 
     def crons(self, now):
         """(state, text) of each armed cron job, oldest first, then the pending
@@ -520,6 +529,37 @@ def workflow_name(inp):
 
 def watch_row(titles):
     return f"waiting review {', '.join(dict.fromkeys(titles))}"
+
+
+def artifact_id(url):
+    m = ARTIFACT_ID_RE.search(url)
+    return m.group(1) if m else url
+
+
+def open_artifacts():
+    """Ids of the claude.ai artifacts open in a Chrome tab (none while Chrome
+    is closed), or None when Chrome can't be asked (no permission, not macOS)."""
+    now = time.time()
+    if now - _tabs[0] < (INTERVAL - 1 if _tabs[1] is not None else TABS_RETRY):
+        return _tabs[1]  # one ask per poll, however many panes watch
+    try:
+        r = subprocess.run(["osascript", "-e", CHROME_TABS], capture_output=True, text=True, timeout=10)
+        ids = set(ARTIFACT_ID_RE.findall(r.stdout)) if r.returncode == 0 else None
+        if ids is None:
+            log(f"can't read Chrome tabs: {r.stderr.strip()}")
+    except (OSError, subprocess.TimeoutExpired):
+        ids = None
+    _tabs[:] = [now, ids]
+    return ids
+
+
+def open_review(pane):
+    """Open in the browser every page the pane's Claude session watches."""
+    t = transcript_for(pane)
+    urls = [url for url, _ in t.watches()] if t else []
+    for url in urls:
+        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
+    print(f"{pane}: opened {len(urls)} review page(s)" if urls else f"{pane}: no review page to open")
 
 
 def orphans(ps_out):
@@ -645,9 +685,12 @@ def render(pane, agents, counts):
     label = "working" if busy else None
     if t:
         items += [(state, GLYPH["cron"], text) for state, text in t.crons(now)]
+        # Only pages open in a browser tab: a closed tab reads as done waiting.
         watched = t.watches()
-        if watched:
-            items.append(("watching", GLYPH["artifact"], watch_row(watched)))
+        tabs = open_artifacts() if watched else None
+        titles = [title for url, title in watched if tabs is None or artifact_id(url) in tabs]
+        if titles:
+            items.append(("watching", GLYPH["artifact"], watch_row(titles)))
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]
     return tuple(items), label
@@ -846,6 +889,9 @@ if __name__ == "__main__":
         for name, pid, ran, cpu in found:
             print(f"{pid:>7}  {age(ran):>4}  {cpu:5.1f}% CPU  {name}")
         print(f"kill {' '.join(str(o[1]) for o in found)}" if found else "no orphaned processes")
+    elif arg == ["--open-review"]:
+        ctx = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
+        open_review(ctx.get("focused_pane_id") or os.environ.get("HERDR_PANE_ID"))
     elif arg == ["--clear"]:
         clear_all()
     elif not arg:
