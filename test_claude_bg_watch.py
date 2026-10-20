@@ -1,8 +1,11 @@
 """Parsing against real Claude Code screens and transcripts: python3 -m unittest"""
+import contextlib
+import io
 import json
 import os
 import tempfile
 import time
+import types
 import unittest
 
 import claude_bg_watch as w
@@ -396,6 +399,20 @@ class MoreBackgroundKinds(unittest.TestCase):
                 self.assertEqual(w.render("p1", [], {})[0], (("watching", "⊙", "waiting review IN-2920, IN-3087"),))
             finally:
                 w.transcript_for, w.open_artifacts = orig
+
+    def test_open_review_reuses_an_open_tab(self):
+        open_url, closed_url = "https://claude.ai/artifact/5rKoYo4ojduC5J8ev5zrdW", "https://claude.ai/artifact/2y8s7jNHabBDAR1xEyUbeB"
+        s = types.SimpleNamespace(watches=lambda: [(open_url, "IN-2920"), (closed_url, "IN-3087")])
+        opened = []
+        orig = (w.transcript_for, w.focus_tab, w.subprocess.run)
+        w.transcript_for, w.focus_tab = lambda pane: s, lambda url: url == open_url
+        w.subprocess.run = lambda args, **kw: opened.append(args[-1])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                w.open_review("p1")
+        finally:
+            w.transcript_for, w.focus_tab, w.subprocess.run = orig
+        self.assertEqual(opened, [closed_url])  # the open page's tab is focused, not duplicated
 
     def test_artifact_row_text(self):
         self.assertEqual(w.watch_row(["IN-3087"]), "waiting review IN-3087")

@@ -116,6 +116,25 @@ ARTIFACT_ID_RE = re.compile(r"claude\.ai/(?:code/)?artifact/([\w-]+)")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 CHROME_TABS = ('if application "Google Chrome" is running then '
                'tell application "Google Chrome" to get URL of every tab of every window')
+# Bring a page's open tab to the front; prints "found" if one was open.
+FOCUS_TAB = """on run {artifactId}
+    if application "Google Chrome" is not running then return ""
+    tell application "Google Chrome"
+        repeat with w in windows
+            set i to 0
+            repeat with t in tabs of w
+                set i to i + 1
+                if URL of t contains artifactId then
+                    set active tab index of w to i
+                    set index of w to 1
+                    activate
+                    return "found"
+                end if
+            end repeat
+        end repeat
+    end tell
+    return ""
+end run"""
 TABS_RETRY = 60  # seconds before asking Chrome again after it refused
 _tabs = [0, None]  # [epoch asked, open artifact ids]
 # CronCreate's result, and ScheduleWakeup's (a self-paced /loop).
@@ -553,12 +572,23 @@ def open_artifacts():
     return ids
 
 
+def focus_tab(url):
+    """Switch Chrome to the page's open tab; False when none is open."""
+    try:
+        r = subprocess.run(["osascript", "-e", FOCUS_TAB, artifact_id(url)],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.stdout.strip() == "found"
+
+
 def open_review(pane):
-    """Open in the browser every page the pane's Claude session watches."""
+    """Show every page the pane's Claude session watches: its open tab, else a new one."""
     t = transcript_for(pane)
     urls = [url for url, _ in t.watches()] if t else []
     for url in urls:
-        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
+        if not focus_tab(url):
+            subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
     print(f"{pane}: opened {len(urls)} review page(s)" if urls else f"{pane}: no review page to open")
 
 
@@ -872,6 +902,11 @@ def stop():
         print("not running")
         return
     os.kill(pid, signal.SIGTERM)
+    # Wait for it to exit (its watcher gets 15s before SIGKILL): a --start
+    # sent while it still holds the lock says "already running" and starts none.
+    deadline = time.time() + 20
+    while lock_holder() and time.time() < deadline:
+        time.sleep(0.1)
     print(f"stopped supervisor pid {pid}")
 
 

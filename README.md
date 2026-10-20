@@ -46,7 +46,8 @@ session itself stays subscribed, so a later comment still reaches it. The
 plugin reads Chrome's tab URLs with `osascript`, which macOS asks you to allow
 once. Where Chrome can't be asked (permission refused, Linux), every watched
 page is shown. Sidebar rows can't be links, so the `open-review` action opens
-the focused agent's watched pages instead; bind it to a key in `config.toml`:
+the focused agent's watched pages instead (switching to a page's tab when one
+is already open); bind it to a key in `config.toml`:
 
 ```toml
 [[keys.command]]
