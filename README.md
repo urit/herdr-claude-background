@@ -26,9 +26,10 @@ Each row starts with an icon for its kind and is colored by state:
 | `▶` | background shell, then how long it has run (`<1m`, `42m`, `13h`, `2d`) so a hung one stands out |
 | `↻` | armed cron job (`CronCreate`, a fixed-interval `/loop`) with its schedule, or a self-paced `/loop`'s next wakeup (`at 10:46`) |
 | `▣` | workflow (the Workflow tool), named after its script, with how long it has run |
+| `⚑` | the session's `/goal` while one is active (Claude keeps working until a check finds it met), shown first |
 | `⊙` | "waiting review": artifacts this session watches for comments and new versions and that are open in a Chrome tab, named by their ticket key when the page path has one, collapsed into one row |
 
-Amber means working, teal is a monitor, cron job or artifact watch that is armed and waiting
+Amber means working, teal is a goal, monitor, cron job or artifact watch that is armed and waiting
 (a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While a subagent, workflow or working shell runs, the agent's state reads
 `working` even when Claude itself is idle. Things that only wait don't count:
 monitors, cron jobs, watched artifacts, and shells that wait (`Wait for …`,
@@ -116,8 +117,8 @@ subagents' — for what each monitor and shell was started to do, and reports
 the result as `$bg1`..`$bg5` pane metadata. When the subagent list is toggled
 off (`/tasks to see subagents`), the running background agents come from the
 transcripts instead: those started by the current Claude process with no
-final completion notice yet. Workflows, cron jobs, `/loop` wakeups and watched
-artifacts have no footer count, so they come from the transcripts only.
+final completion notice yet. Goals, workflows, cron jobs, `/loop` wakeups and
+watched artifacts have no footer count, so they come from the transcripts only.
 
 About once a minute it also looks for orphans: processes whose environment
 says Claude Code started them (`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT`), whose

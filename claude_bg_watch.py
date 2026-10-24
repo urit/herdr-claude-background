@@ -13,7 +13,8 @@ so herdr only ever sees one agent per pane. Every few seconds this watcher:
     (<sessionId>/subagents/*.jsonl) for what each monitor and shell is: the
     description it was started with, minus the ones that ended;
 and reports it back as pane metadata:
-  $bg1..$bg5    rows under the agent, one per subagent/monitor/shell, each led
+  $bg1..$bg5    rows under the agent: the session's /goal first (⚑ goal: …)
+                while one is active, then one per subagent/monitor/shell, each led
                 by a fixed icon for its kind (◇ general-purpose, ⌕ Explore,
                 ▤ Plan, ◎ monitor, ▶ shell, …) and colored by state; a
                 shell's row then says how long it has run (▶ 13h …), as does
@@ -106,7 +107,7 @@ NOTIF_STATUS_RE = re.compile(r"<status>(\w+)</status>")
 # An agent waiting on background work of its own reports "completed" with this
 # note, then notifies again when it really finishes.
 INTERIM = "with background work of its own still running"
-GLYPH = {"monitor": "◎", "shell": "▶", "cron": "↻", "workflow": "▣", "artifact": "⊙"}
+GLYPH = {"monitor": "◎", "shell": "▶", "cron": "↻", "workflow": "▣", "artifact": "⊙", "goal": "⚑"}
 WORKFLOW_NAME_RE = re.compile(r"""\bname:\s*['"]([^'"]+)['"]""")
 # An Artifact publish result says whether this session now watches the page.
 WATCH_RE = re.compile(r"^(?:Live subscription: (?:arming|already connected|connected)"
@@ -247,6 +248,7 @@ class Transcript:
         self.wakeup = None  # pending /loop wakeup: (text, fires at, scheduled at)
         self.watched = {}  # artifact url -> (title, epoch the watch began)
         self.effort = None  # /effort of the latest assistant turn
+        self.goal = None  # the /goal condition Claude keeps working toward
 
     def _text(self, content):
         if isinstance(content, str):
@@ -271,6 +273,12 @@ class Transcript:
             when = epoch(entry.get("timestamp"))
             if entry.get("type") == "assistant" and (entry.get("perTurnEffort") or entry.get("effort")):
                 self.effort = entry.get("perTurnEffort") or entry.get("effort")
+            att = entry.get("attachment") or {}
+            if att.get("type") == "goal_status":
+                # Claude Code's own rule (also on resume): the latest status
+                # holds unless it was met, cleared (met too) or given up on.
+                self.goal = None if att.get("met") or att.get("failed") else att.get("condition")
+                continue
             if entry.get("subtype") == "scheduled_task_fire":
                 self._fired(entry.get("taskId"), str(entry.get("content") or ""), when)
                 continue
@@ -390,6 +398,10 @@ class Session:
 
     def _ended(self):
         return set().union(*(t.ended for t in self.transcripts.values()))
+
+    def goal(self):
+        """The session's active /goal condition, or None."""
+        return self.transcripts[self.path].goal
 
     def agents(self):
         """Background subagents still running, newest first: started by this
@@ -721,6 +733,8 @@ def render(pane, agents, counts):
         titles = [title for url, title in watched if tabs is None or artifact_id(url) in tabs]
         if titles:
             items.append(("watching", GLYPH["artifact"], watch_row(titles)))
+    if t and t.goal():  # first: what the session works toward
+        items.insert(0, ("watching", GLYPH["goal"], f"goal: {t.goal()}"))
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]
     return tuple(items), label

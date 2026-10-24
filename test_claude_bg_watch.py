@@ -400,6 +400,28 @@ class MoreBackgroundKinds(unittest.TestCase):
             finally:
                 w.transcript_for, w.open_artifacts = orig
 
+    def test_goal_row_while_a_goal_is_active(self):
+        # The goal_status attachments Claude Code 2.1.309 writes for /goal.
+        def status(ts, **att):
+            return json.dumps({"type": "attachment", "timestamp": f"2026-10-24T10:{ts}Z",
+                               "attachment": {"type": "goal_status", "condition": "tests pass", **att}})
+        with tempfile.TemporaryDirectory() as d:
+            orig = w.transcript_for
+            try:
+                s = self.session(d, status("16:05", met=False, sentinel=True))  # /goal tests pass
+                w.transcript_for = lambda pane: s
+                self.assertEqual(w.render("p1", [], {}), ((("watching", "⚑", "goal: tests pass"),), None))
+                s = self.session(d, status("16:28", met=False, reason="2 tests still fail"))
+                self.assertEqual(s.goal(), "tests pass")  # checked after a turn, not met yet
+                s = self.session(d, status("16:45", met=True, reason="all pass", iterations=3))
+                self.assertIsNone(s.goal())
+                s = self.session(d, status("17:44", met=False, sentinel=True), status("17:51", met=True, sentinel=True))
+                self.assertIsNone(s.goal())  # /goal clear
+                s = self.session(d, status("18:00", met=False, sentinel=True), status("18:09", met=False, failed=True))
+                self.assertIsNone(s.goal())  # judged impossible
+            finally:
+                w.transcript_for = orig
+
     def test_open_review_reuses_an_open_tab(self):
         open_url, closed_url = "https://claude.ai/artifact/5rKoYo4ojduC5J8ev5zrdW", "https://claude.ai/artifact/2y8s7jNHabBDAR1xEyUbeB"
         s = types.SimpleNamespace(watches=lambda: [(open_url, "IN-2920"), (closed_url, "IN-3087")])
