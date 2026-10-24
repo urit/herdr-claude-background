@@ -29,7 +29,7 @@ Each row starts with an icon for its kind and is colored by state:
 | `⚑` | the session's `/goal` while one is active (Claude keeps working until a check finds it met), shown first |
 | `⊙` | "waiting review": artifacts this session watches for comments and new versions and that are open in a Chrome tab, named by their ticket key when the page path has one, collapsed into one row |
 
-Amber means working, teal is a goal, monitor, cron job or artifact watch that is armed and waiting
+Amber means working, violet is the goal, teal is a monitor, cron job or artifact watch that is armed and waiting
 (a cron row turns amber for a minute after it fires), grey is idle. Up to five rows are shown; past that, the fifth reads `+N more`. While a subagent, workflow or working shell runs, the agent's state reads
 `working` even when Claude itself is idle. Things that only wait don't count:
 monitors, cron jobs, watched artifacts, and shells that wait (`Wait for …`,

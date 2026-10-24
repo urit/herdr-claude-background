@@ -410,7 +410,7 @@ class MoreBackgroundKinds(unittest.TestCase):
             try:
                 s = self.session(d, status("16:05", met=False, sentinel=True))  # /goal tests pass
                 w.transcript_for = lambda pane: s
-                self.assertEqual(w.render("p1", [], {}), ((("watching", "⚑", "goal: tests pass"),), None))
+                self.assertEqual(w.render("p1", [], {}), ((("goal", "⚑", "goal: tests pass"),), None))
                 s = self.session(d, status("16:28", met=False, reason="2 tests still fail"))
                 self.assertEqual(s.goal(), "tests pass")  # checked after a turn, not met yet
                 s = self.session(d, status("16:45", met=True, reason="all pass", iterations=3))

@@ -156,7 +156,7 @@ EVERY_RE = re.compile(r"^Every (?:(\d+) )?(minute|hour|day)s?$")
 # fired an event. herdr draws " · " between tokens, so a row is one token and
 # its color comes from an invisible leading marker matched by the rules in
 # config.toml.
-MARKER = {"working": "​", "watching": "⁠", "idle": ""}
+MARKER = {"working": "​", "watching": "⁠", "goal": "\u200c", "idle": ""}
 # The state label "working" leads with one of these per /effort level, for
 # the state_text rules in config.toml to color; lower levels keep herdr's.
 EFFORT_MARK = {"high": "\u200b", "xhigh": "\u2060", "max": "\u200c"}
@@ -734,7 +734,7 @@ def render(pane, agents, counts):
         if titles:
             items.append(("watching", GLYPH["artifact"], watch_row(titles)))
     if t and t.goal():  # first: what the session works toward
-        items.insert(0, ("watching", GLYPH["goal"], f"goal: {t.goal()}"))
+        items.insert(0, ("goal", GLYPH["goal"], f"goal: {t.goal()}"))
     if len(items) > SLOTS:
         items = items[: SLOTS - 1] + [("idle", "", f"+{len(items) - SLOTS + 1} more")]
     return tuple(items), label

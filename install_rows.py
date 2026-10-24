@@ -22,10 +22,11 @@ HEADER = "[ui.sidebar.agents.rows_by_agent]"
 
 # One token per row (herdr draws " · " between tokens); an invisible leading
 # marker picks the color: U+200B working (amber), U+2060 watching (teal),
-# none = idle (grey).
+# U+200C the /goal (violet), none = idle (grey).
 BG_ROW = ('  [{ token = "$bg%d", fg = "#6c7086", rules = ['
           '{ starts_with = "\\u200B", fg = "#b7a788" }, '
-          '{ starts_with = "\\u2060", fg = "#71a7a3" }] }],')
+          '{ starts_with = "\\u2060", fg = "#71a7a3" }, '
+          '{ starts_with = "\\u200C", fg = "#a093c7" }] }],')
 BG_ROWS = "\n".join(BG_ROW % i for i in range(1, 6))
 # The workspace row for orphaned processes. A [ui.sidebar.spaces] rows list
 # replaces herdr's default one, so it is printed for adding by hand.
