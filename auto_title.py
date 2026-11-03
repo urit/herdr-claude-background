@@ -116,7 +116,7 @@ Reply with the JSON object alone.
 def clean(value):
     """Model output headed for herdr's argv and screen: no control characters,
     no leading dash that herdr could parse as an option."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(value or "")).strip().lstrip("-").strip()
+    return re.sub(r"^[\s-]+", "", re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(value or ""))).rstrip()
 
 
 def ask_model(prompt):
