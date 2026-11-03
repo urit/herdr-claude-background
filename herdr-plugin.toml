@@ -1,14 +1,15 @@
 id = "urit.claude-background"
 name = "Claude background work"
-version = "0.3.8"
+version = "0.4.0"
 min_herdr_version = "0.9.1"
-description = "Show each Claude Code agent's subagents, monitors, shells, workflows, cron jobs and watched artifacts as rows under it in the sidebar, and warn about processes Claude left orphaned"
+description = "Show each Claude Code agent's subagents, monitors, shells, workflows, cron jobs and watched artifacts as rows under it in the sidebar, resume each pane's Claude session after herdr restarts, and warn about processes Claude left orphaned"
 platforms = ["macos", "linux"]
 
-# Starts a detached supervisor that keeps one watcher running for as long as
-# herdr answers; a second start is a no-op.
+# Resumes the Claude session each pane ran before herdr went down, then starts
+# a detached supervisor that keeps one watcher running for as long as herdr
+# answers; a second start is a no-op.
 [[startup]]
-command = ["python3", "claude_bg_watch.py", "--start"]
+command = ["python3", "claude_bg_watch.py", "--start", "--restore"]
 
 [[actions]]
 id = "start"

@@ -33,7 +33,10 @@ install-rows action adds them.
 Usage:
   claude_bg_watch.py           run the watcher in the foreground
   claude_bg_watch.py --start   detach a supervisor that keeps one watcher
-                               running (the plugin's startup hook)
+                               running (the start action)
+  claude_bg_watch.py --start --restore  first resume the Claude session each
+                               pane ran before herdr went down (the plugin's
+                               startup hook), then --start
   claude_bg_watch.py --stop    stop the supervisor; the watcher clears its rows
   claude_bg_watch.py --once    print what each Claude pane would show, and exit
   claude_bg_watch.py --clear   clear every row this plugin reported
@@ -46,6 +49,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -82,6 +86,12 @@ HERDR_GONE = 3
 # else (a herdr restart, another tool) come back within a minute.
 REFRESH_EVERY = 20
 RESTART_DELAY = 5
+# The Claude session each pane runs, kept across a herdr restart so the startup
+# hook can resume them.
+PANES = os.path.join(STATE_DIR, f"panes-{zlib.crc32(SOCKET.encode()):08x}.json")
+# A pane keeps its session this long (seconds) after Claude leaves it: a
+# shutdown kills Claude before herdr, and that must not read as a quit.
+FORGET_AFTER = 60
 
 # main is hollow (◯) while a subagent's view is open, and any line of the list
 # can carry the ❯ selection cursor.
@@ -488,6 +498,7 @@ class Session:
 
 
 sessions = {}
+running = {}  # pane -> (session id, cwd it started in)
 
 
 def transcript_for(pane):
@@ -499,6 +510,7 @@ def transcript_for(pane):
         path = glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", f"{sid}.jsonl"))[0]
     except (ValueError, KeyError, OSError, IndexError):
         return None
+    running[pane] = (sid, info.get("cwd") or "")
     t = sessions.get(pane)
     if not t or t.path != path:  # /clear or a new session in the same pane
         t = sessions[pane] = Session(path)
@@ -775,6 +787,61 @@ def clear_all(*_):
     sys.exit(0)
 
 
+def remembered(saved, live, now):
+    """The next pane -> session map. saved: the last one; live: {pane: (session,
+    cwd)} running Claude now. A pane that lost Claude keeps its entry, stamped
+    "gone", for FORGET_AFTER."""
+    out = {}
+    for pane, e in saved.items():
+        gone = e.get("gone") or now
+        if pane not in live and now - gone < FORGET_AFTER:
+            out[pane] = {**e, "gone": gone}
+    out.update({p: {"session": s, "cwd": c} for p, (s, c) in live.items()})
+    return out
+
+
+def load_panes():
+    try:
+        with open(PANES) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_panes(saved):
+    with open(PANES + ".tmp", "w") as f:
+        json.dump(saved, f)
+    os.replace(PANES + ".tmp", PANES)
+
+
+def to_resume(saved, panes):
+    """[(pane, command)] for the remembered panes herdr lists with no agent in
+    them. panes: herdr's pane list."""
+    # shortcut: trusts a pane id to mean the same pane after a restart (true while
+    # herdr restores session.json; a reset one reuses ids from 1), match cwd too if
+    # that ever resumes a session in the wrong pane.
+    out = []
+    for p in panes:
+        e = saved.get(p["pane_id"])
+        if e and not p.get("agent"):
+            cmd = f"claude --resume {shlex.quote(e['session'])}"
+            out.append((p["pane_id"], f"cd {shlex.quote(e['cwd'])} && {cmd}" if e["cwd"] else cmd))
+    return out
+
+
+def restore():
+    """Resume each remembered session in its pane; herdr brings panes back after
+    a restart as plain shells."""
+    try:
+        panes = json.loads(herdr("pane", "list"))["result"]["panes"]
+    except (ValueError, KeyError, OSError, subprocess.TimeoutExpired):
+        log("restore: herdr did not answer")
+        return
+    for pane, cmd in to_resume(load_panes(), panes):
+        herdr("pane", "run", pane, cmd)
+        log(f"restore: {pane}: {cmd}")
+
+
 def watch():
     signal.signal(signal.SIGTERM, clear_all)
     signal.signal(signal.SIGINT, clear_all)
@@ -782,6 +849,7 @@ def watch():
     # without clearing them (kill -9, crash) get cleared on the first quiet reads.
     shown, empty, down, last_error = {p: None for p in claude_panes() or []}, {}, 0, None
     polls, parent, orphans_shown = 0, os.getppid(), ""  # "" = not reported yet
+    saved = load_panes()
     while os.path.exists(__file__):  # gone = the plugin was uninstalled
         if os.getppid() != parent:  # the supervisor died; the next start brings a new pair
             log("supervisor gone; exiting")
@@ -818,6 +886,10 @@ def watch():
                         shown.pop(pane, None)
             for pane in set(shown) - set(panes):
                 shown.pop(pane, None)
+            new = remembered(saved, {p: running[p] for p in panes if p in running}, time.time())
+            if new != saved:
+                save_panes(new)
+                saved = new
             if polls % ORPHANS_EVERY == 1:
                 row = orphan_row(find_orphans())
                 if row != orphans_shown:
@@ -845,7 +917,7 @@ def lock_holder():
     return None
 
 
-def start():
+def start(restore_first=False):
     """Detach a supervisor and return at once (startup hooks must exit)."""
     os.makedirs(STATE_DIR, exist_ok=True)
     pid = lock_holder()
@@ -871,6 +943,8 @@ def start():
     lock.truncate()
     lock.write(str(os.getpid()))
     lock.flush()
+    if restore_first:
+        restore()  # before the watcher's first poll rewrites the pane map
     supervise()
     os._exit(0)
 
@@ -928,6 +1002,8 @@ if __name__ == "__main__":
     arg = sys.argv[1:]
     if arg == ["--start"]:
         start()
+    elif arg == ["--start", "--restore"]:
+        start(restore_first=True)
     elif arg == ["--stop"]:
         stop()
     elif arg == ["--once"]:

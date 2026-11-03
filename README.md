@@ -70,6 +70,14 @@ command, a hung `git` whose Claude exited):
 `herdr plugin action invoke urit.claude-background.orphans` lists them with
 their pids and the `kill` command.
 
+After a reboot or a herdr restart, herdr brings back its tabs and panes as
+plain shells. The plugin resumes the Claude session each pane was running
+(`claude --resume <id>`, in the directory that session started in), so the
+agents come back where they were. A pane where you quit Claude more than a
+minute before the restart stays a shell. Session-only cron jobs, `/loop`s
+and artifact watches don't survive a restart; ask the agent to set them up
+again.
+
 ## Requirements
 
 - herdr 0.9.1 or newer
@@ -164,6 +172,13 @@ off (`/tasks to see subagents`), the running background agents come from the
 transcripts instead: those started by the current Claude process with no
 final completion notice yet. Goals, workflows, cron jobs, `/loop` wakeups and
 watched artifacts have no footer count, so they come from the transcripts only.
+
+It also keeps which session runs in each pane in
+`panes-<socket crc>.json` in the plugin's state directory. A pane whose
+Claude is gone keeps its entry for a minute, because a shutdown kills Claude
+before herdr. herdr's startup hook runs `--start --restore`, which resumes
+those sessions in the panes herdr lists with no agent, before the watcher
+starts.
 
 About once a minute it also looks for orphans: processes whose environment
 says Claude Code started them (`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT`), whose
