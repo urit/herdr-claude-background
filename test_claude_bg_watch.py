@@ -645,5 +645,55 @@ class ShellAge(unittest.TestCase):
                                      ("working", "▶", "background shell")))
 
 
+
+class RestoreSessions(unittest.TestCase):
+    def test_shutdown_keeps_sessions_a_quit_forgets_them(self):
+        live = {"w2:p1": ("s1", "/w"), "w2:p2": ("s2", "/w/repo")}
+        saved = w.remembered({}, live, 100)
+        self.assertEqual(saved["w2:p1"], {"session": "s1", "cwd": "/w"})
+        # Claude dies before herdr: entries stay, stamped gone.
+        saved = w.remembered(saved, {}, 110)
+        self.assertEqual(saved["w2:p2"], {"session": "s2", "cwd": "/w/repo", "gone": 110})
+        self.assertEqual(w.remembered(saved, {}, 110 + w.FORGET_AFTER - 1).keys(), saved.keys())
+        # No Claude in a pane for FORGET_AFTER: the user quit it.
+        self.assertEqual(w.remembered(saved, {"w2:p1": ("s1", "/w")}, 110 + w.FORGET_AFTER),
+                         {"w2:p1": {"session": "s1", "cwd": "/w"}})
+
+    def test_new_session_in_a_pane_replaces_the_old_one(self):
+        saved = w.remembered({"w2:p1": {"session": "s1", "cwd": "/w", "gone": 5}},
+                             {"w2:p1": ("s9", "/w")}, 10)
+        self.assertEqual(saved, {"w2:p1": {"session": "s9", "cwd": "/w"}})
+
+    def test_resumes_only_remembered_panes_without_an_agent(self):
+        saved = {"w2:p1": {"session": "s1", "cwd": "/Users/me/my repo"},
+                 "w2:p2": {"session": "s2", "cwd": "/w"},
+                 "w2:p3": {"session": "s3", "cwd": ""},
+                 "w2:p9": {"session": "s9", "cwd": "/w"}}  # pane closed since
+        panes = [{"pane_id": "w2:p1"}, {"pane_id": "w2:p2", "agent": "claude"},
+                 {"pane_id": "w2:p3"}, {"pane_id": "w2:p4"}]
+        self.assertEqual(w.to_resume(saved, panes), [
+            ("w2:p1", "cd '/Users/me/my repo' && claude --resume s1"),
+            ("w2:p3", "claude --resume s3"),
+        ])
+
+    def test_restore_runs_the_resume_in_each_pane(self):
+        with tempfile.TemporaryDirectory() as d:
+            old, w.PANES = w.PANES, os.path.join(d, "panes.json")
+            calls = []
+
+            def herdr(*args):
+                calls.append(args)
+                return json.dumps({"result": {"panes": [{"pane_id": "w2:p1"}]}})
+
+            real, w.herdr = w.herdr, herdr
+            try:
+                w.save_panes({"w2:p1": {"session": "s1", "cwd": "/w", "gone": 1}})
+                with contextlib.redirect_stderr(io.StringIO()):
+                    w.restore()
+            finally:
+                w.PANES, w.herdr = old, real
+        self.assertEqual(calls, [("pane", "list"), ("pane", "run", "w2:p1", "cd /w && claude --resume s1")])
+
+
 if __name__ == "__main__":
     unittest.main()
