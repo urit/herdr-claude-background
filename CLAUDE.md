@@ -20,6 +20,11 @@ change worth reinstalling for.
 - `python3 -m unittest`. When Claude Code changes its footer or transcript
   format, add the real lines to `test_claude_bg_watch.py` before fixing the
   parser.
+- `auto_title.py` runs from Claude Code hooks, not from herdr, and logs to
+  `~/.cache/herdr-auto-title/log`. Tests mock `report_summary` and the model;
+  to try a real event, pipe hook JSON into
+  `python3 auto_title.py <pane> <tab>` (it calls Sonnet unless the event is
+  `SessionStart`).
 - Look at the sidebar, not only `--once`: report test values on a pane with a
   different `--source` (`herdr pane report-metadata <pane> --source test
   --token 'bg1=…'`) and render it with

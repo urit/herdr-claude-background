@@ -107,6 +107,51 @@ rows = [
 `start` is only needed the first time: after that, herdr starts the watcher
 every time its server starts.
 
+## Auto-title (optional)
+
+A Claude Code hook that names each agent's tab after the session's subject
+and gives it a headline saying what it is doing right now. On each prompt,
+and on the first `Stop` after it, it sends an excerpt of the conversation to
+Sonnet, then:
+
+- renames the herdr tab when the subject changes (it takes two prompts in a
+  row on a new subject, and it never renames a tab you named yourself);
+- reports the headline as the `$summary` pane token.
+
+Each of those is a `claude -p --model sonnet` call, so it costs up to two
+Sonnet calls per prompt, billed like any other Claude Code use. It runs in the
+background and never delays the session. herdr keeps pane tokens only in
+memory, so a resumed session (after a reboot, say) gets its last headline back
+from the state file in `~/.cache/herdr-auto-title/`, next to the `log`.
+
+To turn it on, add the hook to `~/.claude/settings.json` for three events.
+The path is the plugin's checkout, which `herdr plugin list --json` prints as
+`plugin_root` (GitHub installs live under herdr's plugin data in
+`~/.config/herdr/plugins/`):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "bash <plugin_root>/auto_title_hook.sh", "timeout": 10 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash <plugin_root>/auto_title_hook.sh", "timeout": 10 }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "bash <plugin_root>/auto_title_hook.sh", "timeout": 10 }] }]
+  }
+}
+```
+
+Merge these into any hooks you already have for those events. Then make
+`$summary` the agent's headline: in the `claude` layout `install-rows` wrote,
+replace the first row's `terminal_title_stripped` token (Claude Code's own
+terminal title) with it:
+
+```toml
+  ["state_icon", { token = "$summary", fg = "#cdd6f4", bold = true }],
+```
+
+`install-rows` keeps `terminal_title_stripped`, so the layout works without
+the hook. With it, a new session's headline reads `New session`, then the
+first line of your prompt, until Sonnet's first answer replaces it.
+
 ## How it works
 
 Every 3 seconds the watcher reads each Claude pane's screen for the footer
