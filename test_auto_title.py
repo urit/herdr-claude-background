@@ -60,5 +60,13 @@ class NewTab(unittest.TestCase):
         self.assertEqual(a.new_tab({}, 1, "claude", {"same": False, "tab": "auth PR"}), "auth PR")
 
 
+class Clean(unittest.TestCase):
+    def test_model_output_cannot_pass_as_an_option_or_escape(self):
+        self.assertEqual(a.clean("--help"), "help")
+        self.assertEqual(a.clean(" - IN-3229 "), "IN-3229")
+        self.assertEqual(a.clean("PR\x1b[31m 663\n"), "PR[31m 663")
+        self.assertEqual(a.clean(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()

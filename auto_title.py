@@ -113,6 +113,12 @@ Reply with the JSON object alone.
 """
 
 
+def clean(value):
+    """Model output headed for herdr's argv and screen: no control characters,
+    no leading dash that herdr could parse as an option."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(value or "")).strip().lstrip("-").strip()
+
+
 def ask_model(prompt):
     env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
     env["HERDR_AUTO_TITLE_CHILD"] = "1"
@@ -128,9 +134,9 @@ def ask_model(prompt):
         raise RuntimeError(f"no JSON from model: {out.stdout[:200]!r} {out.stderr[:200]!r}")
     data = json.loads(m.group(0))
     data["same"] = data.get("same") is not False  # a missing answer keeps the name
-    tab = str(data.get("tab") or "").strip()
+    tab = clean(data.get("tab"))
     data["tab"] = tab if len(tab) <= 18 else tab[:19].rsplit(" ", 1)[0][:18]
-    data["title"] = str(data.get("title") or "").strip()[:40]
+    data["title"] = clean(data.get("title"))[:40]
     return data
 
 
